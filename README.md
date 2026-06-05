@@ -3,14 +3,22 @@
 > 一键将 PilotDeck Market Agent 部署到你正在使用的 AI 编码工具
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-18+-339933.svg)](https://nodejs.org/)
 [![MCP](https://img.shields.io/badge/MCP-1.27.2-green.svg)](https://modelcontextprotocol.io/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## 安装
+## Installation
 
+### Python
 ```bash
-cd skills/agent-deploy
-pip install -e .
+pip install agent-deploy
+```
+
+### Node.js
+```bash
+npm install @openpeng/agent-deploy
+# or run directly:
+npx @openpeng/agent-deploy
 ```
 
 ## MCP 配置
@@ -73,6 +81,18 @@ MCP 会调用 `deploy_agent(agent_id="code-reviewer", target_tool="auto")`，自
 | `adapt_agent` | 将 Agent 转换为目标工具格式 |
 | `install_agent` | 将适配后的 Agent 安装到目标目录 |
 
+## Development
+
+### Python
+```bash
+cd python/ && pip install -e ".[dev]" && pytest tests/ -v
+```
+
+### Node.js
+```bash
+cd node/ && npm install && npm test
+```
+
 ## 文档
 
 - [SKILL.md](./SKILL.md) — 用户手册：快速开始、工具参考、FAQ
@@ -82,18 +102,26 @@ MCP 会调用 `deploy_agent(agent_id="code-reviewer", target_tool="auto")`，自
 ## 项目结构
 
 ```
-skills/agent-deploy/
-├── src/agent_deploy/
-│   ├── __init__.py
-│   └── server.py              # MCP Server 主文件
-├── tests/
-│   └── test_server.py
-├── pyproject.toml
+agent-deploy/
+├── python/
+│   ├── src/agent_deploy/
+│   │   ├── __init__.py
+│   │   └── server.py              # MCP Server 主文件
+│   ├── tests/
+│   │   └── test_server.py
+│   └── pyproject.toml
+├── node/
+│   ├── src/
+│   │   └── server.ts              # TypeScript MCP Server
+│   ├── tests/
+│   │   └── server.test.ts         # Test suite (9 tests)
+│   ├── package.json
+│   └── tsconfig.json
 ├── mcp_config.example.json
-├── SKILL.md                   # 用户手册
-├── DEVELOPMENT.md             # 开发者文档
-├── MAINTENANCE.md             # 维护手册
-└── README.md                  # 本文件
+├── SKILL.md                       # 用户手册
+├── DEVELOPMENT.md                 # 开发者文档
+├── MAINTENANCE.md                 # 维护手册
+└── README.md                      # 本文件
 ```
 
 ## License

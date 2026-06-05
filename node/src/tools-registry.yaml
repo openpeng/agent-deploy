@@ -1,0 +1,356 @@
+# Registry of external AI coding tools and their agent extension specifications.
+tools:
+  codebuddy:
+    name: "CodeBuddy Code"
+    display_name: "CodeBuddy"
+    type: cli
+    cli_binary: "codebuddy"
+    install_method: "npm install -g @tencent-ai/codebuddy"
+    detection:
+      env_vars: []
+      config_files:
+        - ".codebuddy/"
+        - "CODEBUDDY.md"
+      binaries:
+        - "codebuddy"
+      process_names:
+        - "codebuddy"
+    agent_format:
+      type: "markdown_yaml_frontmatter"
+      directory: ".codebuddy/skills/{agent_name}/"
+      main_file: "SKILL.md"
+      yaml_fields:
+        name: "name"
+        description: "description"
+        instruction: "body_markdown"
+      notes: "YAML frontmatter with name + description; body is markdown instructions."
+    install:
+      project_level: ".codebuddy/skills/{agent_name}/"
+      user_level: "~/.codebuddy/skills/{agent_name}/"
+      registration: "auto-discovered on next codebuddy launch"
+    configuration:
+      method: "auto_discover"
+      command: null
+      notes: "CodeBuddy auto-discovers SKILL.md files in .codebuddy/skills/ on launch"
+
+  claude_code:
+    name: "Claude Code"
+    display_name: "Anthropic Claude Code"
+    type: cli
+    cli_binary: "claude"
+    install_method: "npm install -g @anthropic-ai/claude-code"
+    detection:
+      env_vars:
+        - "ANTHROPIC_API_KEY"
+      config_files:
+        - ".claude/"
+        - "CLAUDE.md"
+      binaries:
+        - "claude"
+      process_names:
+        - "claude"
+        - "node.*claude"
+    agent_format:
+      type: "markdown_file"
+      directory: ".claude/commands/"
+      main_file: "{agent_name}.md"
+      yaml_fields:
+        name: null
+        description: "first_line_as_description"
+        instruction: "body_markdown"
+      notes: "Custom slash commands. File at .claude/commands/<name>.md."
+    install:
+      project_level: ".claude/commands/{agent_name}.md"
+      user_level: "~/.claude/commands/{agent_name}.md"
+      registration: "auto-discovered on next claude launch"
+    configuration:
+      method: "auto_discover"
+      command: null
+      notes: "Claude Code auto-discovers .claude/commands/*.md on startup"
+
+  cursor:
+    name: "Cursor"
+    display_name: "Cursor AI Editor"
+    type: ide
+    cli_binary: null
+    install_method: "Download from cursor.com"
+    detection:
+      env_vars:
+        - "CURSOR_IPC_HOOK_CLI"
+      config_files:
+        - ".cursor/"
+        - ".cursorrules"
+        - ".cursor/commands/"
+      binaries:
+        - "cursor"
+      process_names:
+        - "Cursor"
+        - "cursor"
+    agent_format:
+      type: "markdown_file"
+      directory: ".cursor/commands/"
+      main_file: "{agent_name}.md"
+      yaml_fields:
+        name: "filename_without_ext"
+        description: "first_line_or_h1"
+        instruction: "body_markdown"
+      notes: "Cursor supports .cursor/commands/ for custom slash commands."
+    install:
+      project_level: ".cursor/commands/{agent_name}.md"
+      user_level: "~/.cursor/commands/{agent_name}.md"
+      registration: "auto-discovered on next Cursor launch"
+    configuration:
+      method: "auto_discover"
+      command: null
+      notes: "Cursor auto-discovers .cursor/commands/*.md on startup"
+
+  github_copilot:
+    name: "GitHub Copilot"
+    display_name: "GitHub Copilot"
+    type: ide_plugin
+    cli_binary: null
+    install_method: "Install Copilot extension in supported IDE"
+    detection:
+      env_vars: []
+      config_files:
+        - ".github/copilot-instructions.md"
+        - ".github/agents/"
+      binaries: []
+      process_names:
+        - "copilot"
+        - "github-copilot"
+    agent_format:
+      type: "markdown_file"
+      directory: ".github/agents/"
+      main_file: "{agent_name}.md"
+      yaml_fields:
+        name: "filename_without_ext"
+        description: "first_line_or_h1"
+        instruction: "body_markdown"
+      notes: "GitHub Copilot uses .github/agents/ for custom agents."
+    install:
+      project_level: ".github/agents/{agent_name}.md"
+      user_level: null
+      registration: "auto-discovered by Copilot on next session"
+    configuration:
+      method: "auto_discover"
+      command: null
+      notes: "Copilot auto-discovers .github/agents/*.md"
+
+  opencode:
+    name: "OpenCode"
+    display_name: "OpenCode"
+    type: cli
+    cli_binary: "opencode"
+    install_method: "npm install -g opencode-ai"
+    detection:
+      env_vars: []
+      config_files:
+        - ".opencode/"
+        - "opencode.json"
+      binaries:
+        - "opencode"
+      process_names:
+        - "opencode"
+    agent_format:
+      type: "markdown_file"
+      directory: ".opencode/commands/"
+      main_file: "{agent_name}.md"
+      yaml_fields:
+        name: "filename_without_ext"
+        description: "first_line_or_h1"
+        instruction: "body_markdown"
+      notes: "OpenCode is an open-source terminal AI tool."
+    install:
+      project_level: ".opencode/commands/{agent_name}.md"
+      user_level: "~/.opencode/commands/{agent_name}.md"
+      registration: "auto-discovered on next opencode launch"
+    configuration:
+      method: "auto_discover"
+      command: null
+      notes: "OpenCode auto-discovers .opencode/commands/*.md on startup"
+
+  windsurf:
+    name: "Windsurf"
+    display_name: "Codeium Windsurf"
+    type: ide
+    cli_binary: null
+    install_method: "Download from windsurf.com"
+    detection:
+      env_vars: []
+      config_files:
+        - ".windsurf/"
+        - ".windsurfrules"
+        - ".windsurf/rules/"
+      binaries:
+        - "windsurf"
+      process_names:
+        - "Windsurf"
+        - "windsurf"
+    agent_format:
+      type: "markdown_file"
+      directory: ".windsurf/rules/"
+      main_file: "{agent_name}.md"
+      yaml_fields:
+        name: "filename_without_ext"
+        description: "first_line_or_h1"
+        instruction: "body_markdown"
+      notes: "Windsurf uses .windsurf/rules/ for behavioral rules."
+    install:
+      project_level: ".windsurf/rules/{agent_name}.md"
+      user_level: "~/.windsurf/rules/{agent_name}.md"
+      registration: "auto-discovered on next Windsurf launch"
+    configuration:
+      method: "auto_discover"
+      command: null
+      notes: "Windsurf auto-discovers .windsurf/rules/*.md on startup"
+
+  trae:
+    name: "Trae"
+    display_name: "ByteDance Trae"
+    type: ide
+    cli_binary: "trae"
+    install_method: "Download from trae.ai or marscode.com"
+    detection:
+      env_vars: []
+      config_files:
+        - ".vscode/extensions.json"
+        - ".trae/"
+      binaries:
+        - "trae"
+      process_names:
+        - "Trae"
+        - "trae"
+    agent_format:
+      type: "markdown_file"
+      directory: ".trae/rules/"
+      main_file: "{agent_name}.md"
+      yaml_fields:
+        name: "filename_without_ext"
+        description: "first_line_or_h1"
+        instruction: "body_markdown"
+      notes: "Trae is VS Code-based (by ByteDance)."
+    install:
+      project_level: ".trae/rules/{agent_name}.md"
+      user_level: "~/.trae/rules/{agent_name}.md"
+      registration: "auto-discovered on next Trae launch"
+    configuration:
+      method: "auto_discover"
+      command: null
+      notes: "Trae auto-discovers .trae/rules/*.md on startup"
+
+  qodo:
+    name: "Qodo"
+    display_name: "Qodo (formerly CodiumAI)"
+    type: ide_plugin
+    cli_binary: null
+    install_method: "Install Qodo Gen plugin in JetBrains/VS Code"
+    detection:
+      env_vars: []
+      config_files:
+        - ".qodo/"
+        - "qodo.config"
+      binaries: []
+      process_names:
+        - "qodo"
+    agent_format:
+      type: "markdown_file"
+      directory: ".qodo/instructions/"
+      main_file: "{agent_name}.md"
+      yaml_fields:
+        name: "filename_without_ext"
+        description: "first_line_or_h1"
+        instruction: "body_markdown"
+      notes: "Qodo focuses on code quality/testing."
+    install:
+      project_level: ".qodo/instructions/{agent_name}.md"
+      user_level: null
+      registration: "auto-discovered by Qodo on next session"
+    configuration:
+      method: "auto_discover"
+      command: null
+      notes: "Qodo auto-discovers .qodo/instructions/*.md"
+
+  aider:
+    name: "Aider"
+    display_name: "Aider AI Pair Programming"
+    type: cli
+    cli_binary: "aider"
+    install_method: "pip install aider-chat"
+    detection:
+      env_vars:
+        - "AIDER_"
+      config_files:
+        - ".aider.conf.yml"
+        - ".aider/"
+        - "CONVENTIONS.md"
+      binaries:
+        - "aider"
+      process_names:
+        - "aider"
+    agent_format:
+      type: "conventions_file"
+      directory: "."
+      main_file: "CONVENTIONS.md"
+      yaml_fields:
+        name: null
+        description: null
+        instruction: "body_markdown"
+      notes: "Aider uses CONVENTIONS.md for project-specific conventions."
+    install:
+      project_level: "CONVENTIONS.md"
+      user_level: null
+      registration: "auto-loaded by aider when CONVENTIONS.md exists in project root"
+    configuration:
+      method: "file_in_project_root"
+      command: null
+      notes: "Aider auto-loads CONVENTIONS.md from project root"
+
+  # AGENTS.md as a universal cross-tool format
+  agents_md:
+    name: "AGENTS.md"
+    display_name: "AGENTS.md (Universal Format)"
+    type: universal
+    cli_binary: null
+    install_method: "No installation needed - just place AGENTS.md in project root"
+    detection:
+      env_vars: []
+      config_files:
+        - "AGENTS.md"
+      binaries: []
+      process_names: []
+    agent_format:
+      type: "markdown_file"
+      directory: "."
+      main_file: "AGENTS.md"
+      yaml_fields:
+        name: null
+        description: null
+        instruction: "body_markdown_with_sections"
+      notes: "AGENTS.md is an emerging open standard supported by Cursor, Copilot, CodeBuddy, Claude Code, Windsurf, and more."
+    install:
+      project_level: "AGENTS.md"
+      user_level: null
+      registration: "auto-discovered by all tools that support AGENTS.md"
+    configuration:
+      method: "file_in_project_root"
+      command: null
+      notes: "AGENTS.md is auto-discovered by all compatible tools."
+
+# Common detection patterns
+common_detection:
+  vscode_base:
+    env_vars:
+      - "VSCODE_PID"
+      - "VSCODE_IPC_HOOK_CLI"
+    config_files:
+      - ".vscode/"
+    description: "Any VS Code-based IDE"
+  jetbrains_base:
+    config_files:
+      - ".idea/"
+    description: "Any JetBrains-based IDE"
+  cli_base:
+    env_vars:
+      - "TERM"
+    description: "Any terminal-based tool"
