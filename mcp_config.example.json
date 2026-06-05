@@ -1,0 +1,14 @@
+{
+  "_comment": "Example MCP client config for agent-deploy. Add this to your MCP client (Claude Desktop, OpenCode, etc.) and adjust paths/keys as needed.",
+  "mcpServers": {
+    "agent-deploy": {
+      "command": "python",
+      "args": ["-m", "agent_deploy.server"],
+      "cwd": "/home/xiaopeng/mounts/new_volume/Sasa/skills/agent-deploy",
+      "env": {
+        "PYTHONPATH": "/home/xiaopeng/mounts/new_volume/Sasa/skills/agent-deploy/src",
+        "MARKET_API_URL": "http://localhost:8321"
+      }
+    }
+  }
+}

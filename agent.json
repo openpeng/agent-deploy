@@ -1,0 +1,37 @@
+{
+  "name": "agent-deploy",
+  "version": "0.1.0",
+  "description": "MCP server that deploys PilotDeck Market agents to external AI coding tools (Cursor, Claude Code, CodeBuddy, OpenCode, Copilot, Windsurf, Trae, Aider, AGENTS.md).",
+  "category": "deployment",
+  "tags": [
+    "mcp",
+    "model-context-protocol",
+    "agent-deployment",
+    "auto-adapter",
+    "market",
+    "cross-tool"
+  ],
+  "entry_point": "src/agent_deploy/server.py",
+  "runtime": "python>=3.10",
+  "dependencies": [
+    "mcp>=1.0",
+    "pyyaml>=6.0"
+  ],
+  "mcp": {
+    "transport": "stdio",
+    "command": "python",
+    "args": ["-m", "agent_deploy.server"]
+  },
+  "tools_exposed": [
+    "list_installed_tools",
+    "adapt_agent",
+    "install_agent",
+    "deploy_agent"
+  ],
+  "related_skills": [
+    "auto-adapter",
+    "market-helper"
+  ],
+  "author": "PilotDeck Contributors",
+  "license": "MIT"
+}
