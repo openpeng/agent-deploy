@@ -7,6 +7,7 @@ import {
 } from "./types.js";
 import { ExecutionContextManager } from "./context.js";
 import { TemplateResolver } from "./template.js";
+import { ToolRegistry } from "./tool-registry.js";
 
 /**
  * Tool interface for pipeline execution
@@ -16,28 +17,8 @@ export interface Tool {
   execute(args: any, context: ExecutionContext): Promise<any>;
 }
 
-/**
- * Tool registry for managing tools
- */
-export class ToolRegistry {
-  private tools = new Map<string, Tool>();
-
-  register(tool: Tool): void {
-    this.tools.set(tool.name, tool);
-  }
-
-  get(name: string): Tool | undefined {
-    return this.tools.get(name);
-  }
-
-  has(name: string): boolean {
-    return this.tools.has(name);
-  }
-
-  getAll(): Tool[] {
-    return Array.from(this.tools.values());
-  }
-}
+// Re-export ToolRegistry for backward compatibility
+export { ToolRegistry };
 
 /**
  * Simple logger interface
