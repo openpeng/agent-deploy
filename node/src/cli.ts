@@ -8,6 +8,8 @@ import { parseArgs } from "node:util";
 import { existsSync } from "fs";
 import fs from "fs";
 import { resolve } from "path";
+import * as path from "path";
+import * as yaml from "js-yaml";
 import { ImportManager } from "./import-manager.js";
 import { CursorImportAdapter } from "./adapters/cursor-import.js";
 import { ClaudeImportAdapter } from "./adapters/claude-import.js";
@@ -19,6 +21,17 @@ import { installAgent } from "./install.js";
 import { detectAll } from "./detect.js";
 import { ErrorHandlers, handleCommandError, UserFriendlyError } from "./errors.js";
 import { listTemplates, getTemplate, initFromTemplate } from "./templates.js";
+import { PipelineEngine, ConsoleLogger } from "./runtime/pipeline.js";
+import { ToolRegistry } from "./runtime/tool-registry.js";
+import { ExecutionContextManager } from "./runtime/context.js";
+import { WorkerYaml } from "./runtime/types.js";
+import { ReadFileTool } from "./runtime/tools/read-file.js";
+import { WriteFileTool } from "./runtime/tools/write-file.js";
+import { BashTool } from "./runtime/tools/bash.js";
+import { GlobTool } from "./runtime/tools/glob.js";
+import { LLMChatTool } from "./runtime/tools/llm-chat.js";
+import { WebFetchTool } from "./runtime/tools/web-fetch.js";
+import { WebSearchTool } from "./runtime/tools/web-search.js";
 
 const VERSION = "1.0.0";
 
@@ -33,6 +46,7 @@ Usage:
   agent-deploy import <source> [options]
   agent-deploy upload <agent-dir> [options]
   agent-deploy deploy <agent-dir> [options]
+  agent-deploy run <agent-dir> [options]
   agent-deploy list [options]
   agent-deploy search <query> [options]
   agent-deploy info <agent-id> [options]
@@ -45,6 +59,7 @@ Commands:
   import <source>       Import agent from AI tool format to agent.json
   upload <agent-dir>    Upload agent to Market
   deploy <agent-dir>    Deploy agent to AI coding tool(s)
+  run <agent-dir>       Execute agent with runtime engine
   list                  List local agents
   search <query>        Search agents in Market
   info <agent-id>       Show detailed agent information
@@ -68,6 +83,13 @@ Deploy Options:
   -t, --tool <name>     Target tool (cursor, claude_code, codebuddy, etc.)
                         Use 'auto' for auto-detect, 'all' for all detected tools
   -l, --level <level>   Install level: project, user, or both (default: both)
+  -h, --help            Show this help message
+
+Run Options:
+  --args <json>         Arguments to pass to agent (JSON object)
+  --cwd <dir>           Working directory for agent execution (default: agent directory)
+  --env <json>          Environment variables (JSON object)
+  -v, --verbose         Verbose output (show step details)
   -h, --help            Show this help message
 
 List Options:
@@ -101,6 +123,11 @@ Examples:
 
   # Deploy to specific tool
   agent-deploy deploy ./imported-agents/my-agent -t cursor
+
+  # Run agent with runtime engine
+  agent-deploy run ./agents/my-agent
+  agent-deploy run ./agents/my-agent --args '{"input": "data"}'
+  agent-deploy run ./agents/my-agent --verbose
 
   # List local agents
   agent-deploy list
@@ -773,6 +800,183 @@ Examples:
 }
 
 /**
+ * Handle run command
+ */
+async function handleRunCommand(args: string[]) {
+  try {
+    // Parse arguments
+    const { values, positionals } = parseArgs({
+      args,
+      options: {
+        args: { type: "string" },
+        cwd: { type: "string" },
+        env: { type: "string" },
+        verbose: { type: "boolean", short: "v", default: false },
+        help: { type: "boolean", short: "h", default: false },
+      },
+      allowPositionals: true,
+    });
+
+    if (values.help) {
+      console.log(`
+Usage: agent-deploy run <agent-dir> [options]
+
+Execute an agent using the runtime engine.
+
+Arguments:
+  <agent-dir>           Path to agent directory (containing agent.json and worker.yaml)
+
+Options:
+  --args <json>         Arguments to pass to agent (JSON object)
+  --cwd <dir>           Working directory for agent execution (default: agent directory)
+  --env <json>          Environment variables (JSON object)
+  -v, --verbose         Verbose output (show step details)
+  -h, --help            Show this help message
+
+Examples:
+  agent-deploy run ./agents/my-agent
+  agent-deploy run ./agents/processor --args '{"input": "data.txt"}'
+  agent-deploy run ./agents/builder --cwd ./project --verbose
+      `);
+      return;
+    }
+
+    // Get agent directory
+    const agentDir = positionals[0];
+    if (!agentDir) {
+      console.error("❌ Error: agent directory is required\n");
+      console.error("Usage: agent-deploy run <agent-dir> [options]");
+      console.error("Run 'agent-deploy run --help' for more information");
+      process.exit(1);
+    }
+
+    // Resolve paths
+    const resolvedAgentDir = resolve(agentDir);
+
+    // Verify directory exists
+    if (!existsSync(resolvedAgentDir)) {
+      throw ErrorHandlers.fileNotFound(resolvedAgentDir, "directory");
+    }
+
+    // Verify agent.json exists
+    const agentJsonPath = path.join(resolvedAgentDir, "agent.json");
+    if (!existsSync(agentJsonPath)) {
+      throw ErrorHandlers.missingAgentJson(resolvedAgentDir);
+    }
+
+    // Verify worker.yaml exists
+    const workerYamlPath = path.join(resolvedAgentDir, "worker.yaml");
+    if (!existsSync(workerYamlPath)) {
+      throw new Error(`worker.yaml not found in agent directory: ${resolvedAgentDir}`);
+    }
+
+    // Load agent.json
+    const agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
+    const agentName = agentJson.identity?.name || agentJson.name || path.basename(resolvedAgentDir);
+
+    // Load worker.yaml
+    const workerYaml = yaml.load(fs.readFileSync(workerYamlPath, "utf-8")) as WorkerYaml;
+
+    // Parse arguments
+    let initialArgs: Record<string, any> = {};
+    if (values.args) {
+      try {
+        initialArgs = JSON.parse(values.args as string);
+      } catch (error) {
+        console.error("❌ Error: Invalid JSON for --args");
+        console.error(`   ${(error as Error).message}`);
+        process.exit(1);
+      }
+    }
+
+    // Parse environment variables
+    let envVars: Record<string, string> = {};
+    if (values.env) {
+      try {
+        envVars = JSON.parse(values.env as string);
+      } catch (error) {
+        console.error("❌ Error: Invalid JSON for --env");
+        console.error(`   ${(error as Error).message}`);
+        process.exit(1);
+      }
+    }
+
+    // Determine working directory
+    const workingDir = values.cwd ? resolve(values.cwd as string) : resolvedAgentDir;
+
+    // Display execution info
+    console.log(`🚀 Running agent: ${agentName}\n`);
+    console.log(`Agent directory: ${resolvedAgentDir}`);
+    console.log(`Working directory: ${workingDir}`);
+    if (Object.keys(initialArgs).length > 0) {
+      console.log(`Arguments: ${JSON.stringify(initialArgs)}`);
+    }
+    if (Object.keys(envVars).length > 0) {
+      console.log(`Environment: ${JSON.stringify(envVars)}`);
+    }
+    console.log();
+
+    // Create tool registry with all builtin tools
+    const registry = new ToolRegistry();
+    registry.register(new ReadFileTool());
+    registry.register(new WriteFileTool());
+    registry.register(new BashTool());
+    registry.register(new GlobTool());
+    registry.register(new LLMChatTool());
+    registry.register(new WebFetchTool());
+    registry.register(new WebSearchTool());
+
+    // Create execution context
+    const context = ExecutionContextManager.create({
+      agent: { name: agentName },
+      initialArgs,
+      cwd: workingDir,
+      env: envVars,
+    });
+
+    // Create pipeline engine with optional verbose logging
+    const logger = new ConsoleLogger(values.verbose as boolean);
+    const engine = new PipelineEngine(registry, logger);
+
+    // Execute pipeline
+    console.log("⏳ Executing pipeline...\n");
+    const startTime = Date.now();
+
+    const result = await engine.execute(workerYaml, context);
+
+    const duration = Date.now() - startTime;
+
+    // Display results
+    console.log("\n✅ Pipeline execution completed!\n");
+    console.log(`Duration: ${duration}ms`);
+
+    // Show execution summary
+    const summary = ExecutionContextManager.getSummary(context);
+    console.log(`\nExecution Summary:`);
+    console.log(`  Total steps:    ${summary.total_steps}`);
+    console.log(`  Successful:     ${summary.successful_steps}`);
+    console.log(`  Failed:         ${summary.failed_steps}`);
+
+    // Show result
+    if (result !== null && result !== undefined) {
+      console.log(`\nResult:`);
+      if (typeof result === "object") {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(result);
+      }
+    }
+
+    // Exit with appropriate code
+    if (summary.failed_steps > 0) {
+      process.exit(1);
+    }
+  } catch (error) {
+    handleCommandError(error as Error, "run");
+  }
+}
+
+/**
  * Handle templates command
  */
 async function handleTemplatesCommand(args: string[]) {
@@ -873,6 +1077,8 @@ async function main() {
     await handleUploadCommand(args.slice(1));
   } else if (command === "deploy") {
     await handleDeployCommand(args.slice(1));
+  } else if (command === "run") {
+    await handleRunCommand(args.slice(1));
   } else if (command === "list") {
     await handleListCommand(args.slice(1));
   } else if (command === "search") {
@@ -885,7 +1091,7 @@ async function main() {
     await handleTemplatesCommand(args.slice(1));
   } else {
     console.error(`❌ Unknown command: ${command}\n`);
-    console.error("Available commands: import, upload, deploy, list, search, info, init, templates");
+    console.error("Available commands: import, upload, deploy, run, list, search, info, init, templates");
     console.error("Run 'agent-deploy --help' for more information");
     process.exit(1);
   }

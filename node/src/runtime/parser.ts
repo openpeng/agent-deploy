@@ -6,7 +6,7 @@ import {
   ToolDefinition,
   PipelineStep,
   ValidationResult,
-} from "./types";
+} from "./types.js";
 
 /**
  * Parse and validate worker.yaml file
@@ -33,9 +33,10 @@ export class WorkerYamlParser {
     try {
       parsed = yaml.load(content);
     } catch (error) {
+      const err = error as Error;
       throw new Error(
         `Failed to parse YAML${sourcePath ? ` in ${sourcePath}` : ""}: ${
-          error.message
+          err.message
         }`
       );
     }
@@ -85,7 +86,7 @@ export class WorkerYamlParser {
       errors.push("'pipeline' array is required and must not be empty");
     } else {
       const stepNames = new Set<string>();
-      const toolNames = new Set(workerYaml.tools.map((t) => t.name));
+      const toolNames = new Set(workerYaml.tools.map((t: ToolDefinition) => t.name));
 
       for (let i = 0; i < workerYaml.pipeline.length; i++) {
         const step = workerYaml.pipeline[i];

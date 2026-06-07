@@ -1,0 +1,10 @@
+{
+  "identity": {
+    "name": "hello-agent",
+    "version": "1.0.0",
+    "display_name": "Hello Agent",
+    "description": "A simple test agent",
+    "author": "Test Team",
+    "tags": ["test", "demo"]
+  }
+}

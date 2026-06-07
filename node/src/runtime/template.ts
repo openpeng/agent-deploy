@@ -1,4 +1,5 @@
-import { ExecutionContext, ExecutionContextManager } from "./context.js";
+import { ExecutionContext } from "./types.js";
+import { ExecutionContextManager } from "./context.js";
 
 /**
  * Template variable resolver

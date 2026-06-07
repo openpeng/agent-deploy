@@ -135,14 +135,14 @@ export class LLMChatTool implements Tool {
       : response.content.map((c: any) => (typeof c === "string" ? c : c.text || "")).join("");
 
     // Calculate tokens (LangChain includes usage metadata)
-    const tokensUsed = response.response_metadata?.usage
-      ? response.response_metadata.usage.input_tokens +
-        response.response_metadata.usage.output_tokens
+    const usage = response.response_metadata?.usage as any;
+    const tokensUsed = usage
+      ? (usage.input_tokens || 0) + (usage.output_tokens || 0)
       : 0;
 
     return {
       content,
-      model: response.response_metadata?.model || model,
+      model: (response.response_metadata?.model as string) || model,
       tokens_used: tokensUsed,
       duration_ms: duration,
     };
@@ -189,14 +189,14 @@ export class LLMChatTool implements Tool {
       : response.content.map((c: any) => (typeof c === "string" ? c : c.text || "")).join("");
 
     // Calculate tokens (LangChain includes usage metadata)
-    const tokensUsed = response.response_metadata?.tokenUsage
-      ? response.response_metadata.tokenUsage.promptTokens +
-        response.response_metadata.tokenUsage.completionTokens
+    const tokenUsage = response.response_metadata?.tokenUsage as any;
+    const tokensUsed = tokenUsage
+      ? (tokenUsage.promptTokens || 0) + (tokenUsage.completionTokens || 0)
       : 0;
 
     return {
       content,
-      model: response.response_metadata?.model || model,
+      model: (response.response_metadata?.model as string) || model,
       tokens_used: tokensUsed,
       duration_ms: duration,
     };
