@@ -1,11 +1,13 @@
-import Anthropic from "@anthropic-ai/sdk";
-import OpenAI from "openai";
+import { ChatAnthropic } from "@langchain/anthropic";
+import { ChatOpenAI } from "@langchain/openai";
+import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { Tool } from "../pipeline.js";
 import { ExecutionContext } from "../types.js";
 
 /**
  * LLM Chat tool
- * Calls LLM APIs (Anthropic Claude or OpenAI GPT)
+ * Calls LLM APIs using LangChain for unified interface
+ * Supports multiple providers: Anthropic, OpenAI, and more
  */
 export class LLMChatTool implements Tool {
   name = "llm_chat";
@@ -62,7 +64,7 @@ export class LLMChatTool implements Tool {
 
     try {
       if (provider === "anthropic") {
-        return await this.callAnthropic(
+        return await this.callWithLangChainAnthropic(
           apiKey,
           args.prompt,
           args.system_prompt,
@@ -73,7 +75,7 @@ export class LLMChatTool implements Tool {
           startTime
         );
       } else {
-        return await this.callOpenAI(
+        return await this.callWithLangChainOpenAI(
           apiKey,
           args.prompt,
           args.system_prompt,
@@ -92,7 +94,7 @@ export class LLMChatTool implements Tool {
     }
   }
 
-  private async callAnthropic(
+  private async callWithLangChainAnthropic(
     apiKey: string,
     prompt: string,
     systemPrompt: string | undefined,
@@ -107,42 +109,46 @@ export class LLMChatTool implements Tool {
     tokens_used: number;
     duration_ms: number;
   }> {
-    const client = new Anthropic({
-      apiKey,
-      baseURL: apiBase,
+    const llm = new ChatAnthropic({
+      anthropicApiKey: apiKey,
+      modelName: model,
+      temperature,
+      maxTokens,
+      ...(apiBase && { anthropicApiUrl: apiBase }),
     });
 
-    const response = await client.messages.create({
-      model,
-      max_tokens: maxTokens,
-      temperature,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-    });
+    // Build messages
+    const messages = [];
+    if (systemPrompt) {
+      messages.push(new SystemMessage(systemPrompt));
+    }
+    messages.push(new HumanMessage(prompt));
+
+    // Invoke LLM
+    const response = await llm.invoke(messages);
 
     const duration = Date.now() - startTime;
 
-    // Extract text content
-    const content =
-      response.content[0].type === "text" ? response.content[0].text : "";
+    // Extract content
+    const content = typeof response.content === "string"
+      ? response.content
+      : response.content.map((c: any) => (typeof c === "string" ? c : c.text || "")).join("");
 
-    // Calculate tokens used
-    const tokensUsed = response.usage.input_tokens + response.usage.output_tokens;
+    // Calculate tokens (LangChain includes usage metadata)
+    const tokensUsed = response.response_metadata?.usage
+      ? response.response_metadata.usage.input_tokens +
+        response.response_metadata.usage.output_tokens
+      : 0;
 
     return {
       content,
-      model: response.model,
+      model: response.response_metadata?.model || model,
       tokens_used: tokensUsed,
       duration_ms: duration,
     };
   }
 
-  private async callOpenAI(
+  private async callWithLangChainOpenAI(
     apiKey: string,
     prompt: string,
     systemPrompt: string | undefined,
@@ -157,37 +163,40 @@ export class LLMChatTool implements Tool {
     tokens_used: number;
     duration_ms: number;
   }> {
-    const client = new OpenAI({
-      apiKey,
-      baseURL: apiBase,
-    });
-
-    const messages: any[] = [];
-    if (systemPrompt) {
-      messages.push({ role: "system", content: systemPrompt });
-    }
-    messages.push({ role: "user", content: prompt });
-
-    const response = await client.chat.completions.create({
-      model,
-      messages,
+    const llm = new ChatOpenAI({
+      openAIApiKey: apiKey,
+      modelName: model,
       temperature,
-      max_tokens: maxTokens,
+      maxTokens,
+      ...(apiBase && { configuration: { baseURL: apiBase } }),
     });
+
+    // Build messages
+    const messages = [];
+    if (systemPrompt) {
+      messages.push(new SystemMessage(systemPrompt));
+    }
+    messages.push(new HumanMessage(prompt));
+
+    // Invoke LLM
+    const response = await llm.invoke(messages);
 
     const duration = Date.now() - startTime;
 
     // Extract content
-    const content = response.choices[0]?.message?.content || "";
+    const content = typeof response.content === "string"
+      ? response.content
+      : response.content.map((c: any) => (typeof c === "string" ? c : c.text || "")).join("");
 
-    // Calculate tokens used
-    const tokensUsed = response.usage
-      ? response.usage.prompt_tokens + response.usage.completion_tokens
+    // Calculate tokens (LangChain includes usage metadata)
+    const tokensUsed = response.response_metadata?.tokenUsage
+      ? response.response_metadata.tokenUsage.promptTokens +
+        response.response_metadata.tokenUsage.completionTokens
       : 0;
 
     return {
       content,
-      model: response.model,
+      model: response.response_metadata?.model || model,
       tokens_used: tokensUsed,
       duration_ms: duration,
     };
