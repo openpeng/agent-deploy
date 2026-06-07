@@ -1,7 +1,7 @@
 // Runtime types for Agent Protocol v3
 
 export interface WorkerYaml {
-  tools: ToolDefinition[];
+  tools?: ToolDefinition[]; // Optional - builtin tools are always available
   shared_context?: Record<string, any>;
   pipeline: PipelineStep[];
 }

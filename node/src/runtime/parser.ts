@@ -61,10 +61,8 @@ export class WorkerYamlParser {
   validate(workerYaml: WorkerYaml): ValidationResult {
     const errors: string[] = [];
 
-    // 1. Validate tools
-    if (!workerYaml.tools || workerYaml.tools.length === 0) {
-      errors.push("'tools' array is required and must not be empty");
-    } else {
+    // 1. Validate tools (optional - builtin tools are always available)
+    if (workerYaml.tools) {
       const toolNames = new Set<string>();
       for (const tool of workerYaml.tools) {
         if (!tool.name) {
@@ -86,7 +84,18 @@ export class WorkerYamlParser {
       errors.push("'pipeline' array is required and must not be empty");
     } else {
       const stepNames = new Set<string>();
-      const toolNames = new Set(workerYaml.tools.map((t: ToolDefinition) => t.name));
+      const declaredToolNames = new Set(workerYaml.tools?.map((t: ToolDefinition) => t.name) || []);
+
+      // Builtin tools that are always available
+      const builtinTools = new Set([
+        "read_file",
+        "write_file",
+        "bash",
+        "glob",
+        "llm_chat",
+        "web_fetch",
+        "web_search"
+      ]);
 
       for (let i = 0; i < workerYaml.pipeline.length; i++) {
         const step = workerYaml.pipeline[i];
@@ -100,10 +109,10 @@ export class WorkerYamlParser {
           stepNames.add(step.step);
         }
 
-        // Check tool reference
+        // Check tool reference - allow builtin tools or declared tools
         if (!step.tool) {
           errors.push(`Step '${step.step}' is missing 'tool' field`);
-        } else if (!toolNames.has(step.tool)) {
+        } else if (!declaredToolNames.has(step.tool) && !builtinTools.has(step.tool)) {
           errors.push(
             `Step '${step.step}' references undefined tool: ${step.tool}`
           );

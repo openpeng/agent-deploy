@@ -32,6 +32,7 @@ import { GlobTool } from "./runtime/tools/glob.js";
 import { LLMChatTool } from "./runtime/tools/llm-chat.js";
 import { WebFetchTool } from "./runtime/tools/web-fetch.js";
 import { WebSearchTool } from "./runtime/tools/web-search.js";
+import { V2CompatibilityLayer } from "./runtime/v2-compat.js";
 
 const VERSION = "1.0.0";
 
@@ -864,18 +865,24 @@ Examples:
       throw ErrorHandlers.missingAgentJson(resolvedAgentDir);
     }
 
-    // Verify worker.yaml exists
-    const workerYamlPath = path.join(resolvedAgentDir, "worker.yaml");
-    if (!existsSync(workerYamlPath)) {
-      throw new Error(`worker.yaml not found in agent directory: ${resolvedAgentDir}`);
-    }
-
     // Load agent.json
     const agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
     const agentName = agentJson.identity?.name || agentJson.name || path.basename(resolvedAgentDir);
 
-    // Load worker.yaml
-    const workerYaml = yaml.load(fs.readFileSync(workerYamlPath, "utf-8")) as WorkerYaml;
+    // Use compatibility layer to get worker.yaml (supports v2 agents)
+    const v2Compat = new V2CompatibilityLayer();
+    let workerYaml: WorkerYaml;
+
+    try {
+      workerYaml = v2Compat.getWorkerYaml(resolvedAgentDir);
+
+      // Show v2 compatibility message if applicable
+      if (v2Compat.isV2Agent(agentJsonPath)) {
+        console.log("ℹ️  v2 agent detected - running in compatibility mode\n");
+      }
+    } catch (error) {
+      throw new Error(`Failed to load agent: ${(error as Error).message}`);
+    }
 
     // Parse arguments
     let initialArgs: Record<string, any> = {};

@@ -109,18 +109,27 @@ pipeline:
       expect(result.errors).toHaveLength(0);
     });
 
-    it("should detect missing tools array", () => {
+    it("should allow missing tools array (builtin tools always available)", () => {
       const workerYaml: any = {
-        tools: [],
-        pipeline: [{ step: "test", tool: "test" }],
+        pipeline: [{ step: "test", tool: "bash", args: { command: "echo test" } }],
       };
 
       const result = parser.validate(workerYaml);
 
-      expect(result.valid).toBe(false);
-      expect(result.errors).toContain(
-        "'tools' array is required and must not be empty"
-      );
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it("should allow empty tools array (builtin tools always available)", () => {
+      const workerYaml: any = {
+        tools: [],
+        pipeline: [{ step: "test", tool: "read_file", args: { path: "test.txt" } }],
+      };
+
+      const result = parser.validate(workerYaml);
+
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
     });
 
     it("should detect missing pipeline array", () => {
@@ -167,11 +176,11 @@ pipeline:
       expect(result.errors).toContain("Duplicate step name: step1");
     });
 
-    it("should detect undefined tool reference", () => {
+    it("should detect undefined tool reference (not builtin or declared)", () => {
       const workerYaml: WorkerYaml = {
-        tools: [{ name: "llm_chat", type: "builtin" }],
+        tools: [{ name: "custom_tool", type: "custom" }],
         pipeline: [
-          { step: "read", tool: "read_file" }, // read_file not defined
+          { step: "read", tool: "undefined_tool" }, // Not builtin and not declared
         ],
       };
 
@@ -179,8 +188,21 @@ pipeline:
 
       expect(result.valid).toBe(false);
       expect(result.errors).toContain(
-        "Step 'read' references undefined tool: read_file"
+        "Step 'read' references undefined tool: undefined_tool"
       );
+    });
+
+    it("should allow builtin tool references without declaration", () => {
+      const workerYaml: WorkerYaml = {
+        tools: [{ name: "custom_tool", type: "custom" }],
+        pipeline: [
+          { step: "read", tool: "read_file" }, // Builtin tool - always available
+        ],
+      };
+
+      const result = parser.validate(workerYaml);
+
+      expect(result.valid).toBe(true);
     });
 
     it("should validate on_fail strategies", () => {
