@@ -6,6 +6,7 @@ import {
   OnFailStrategy,
 } from "./types.js";
 import { ExecutionContextManager } from "./context.js";
+import { TemplateResolver } from "./template.js";
 
 /**
  * Tool interface for pipeline execution
@@ -77,10 +78,14 @@ export class ConsoleLogger implements Logger {
  * Pipeline execution engine
  */
 export class PipelineEngine {
+  private templateResolver: TemplateResolver;
+
   constructor(
     private toolRegistry: ToolRegistry,
     private logger: Logger = new ConsoleLogger()
-  ) {}
+  ) {
+    this.templateResolver = new TemplateResolver();
+  }
 
   /**
    * Execute a pipeline
@@ -109,7 +114,7 @@ export class PipelineEngine {
       }
 
       // Resolve template variables in args
-      const resolvedArgs = this.resolveTemplateVars(step.args || {}, context);
+      const resolvedArgs = this.templateResolver.resolve(step.args || {}, context);
 
       // Execute step
       const result = await this.executeStep(step, resolvedArgs, context);
@@ -179,7 +184,7 @@ export class PipelineEngine {
   private evaluateCondition(condition: string, context: ExecutionContext): boolean {
     try {
       // Replace template variables
-      const resolved = this.resolveTemplateVars(condition, context);
+      const resolved = this.templateResolver.resolve(condition, context);
 
       // Simple evaluation: check if it's a truthy value
       if (typeof resolved === "boolean") {
@@ -200,83 +205,6 @@ export class PipelineEngine {
       this.logger.warn(`Failed to evaluate condition '${condition}': ${(error as Error).message}`);
       return false;
     }
-  }
-
-  /**
-   * Resolve template variables in a value
-   */
-  private resolveTemplateVars(template: any, context: ExecutionContext): any {
-    if (typeof template === "string") {
-      return this.resolveString(template, context);
-    } else if (Array.isArray(template)) {
-      return template.map((item) => this.resolveTemplateVars(item, context));
-    } else if (typeof template === "object" && template !== null) {
-      const result: any = {};
-      for (const [key, value] of Object.entries(template)) {
-        result[key] = this.resolveTemplateVars(value, context);
-      }
-      return result;
-    }
-    return template;
-  }
-
-  /**
-   * Resolve template variables in a string
-   */
-  private resolveString(str: string, context: ExecutionContext): any {
-    // Pattern: {{variable}}
-    const pattern = /\{\{([^}]+)\}\}/g;
-
-    // Check if the entire string is a single variable reference
-    const singleVarMatch = str.match(/^\{\{([^}]+)\}\}$/);
-    if (singleVarMatch) {
-      const varPath = singleVarMatch[1].trim();
-      const value = this.resolveVariable(varPath, context);
-      return value; // Return as-is to preserve type
-    }
-
-    // Replace all variables in the string
-    return str.replace(pattern, (match, varPath) => {
-      const value = this.resolveVariable(varPath.trim(), context);
-      return value !== undefined ? String(value) : match;
-    });
-  }
-
-  /**
-   * Resolve a variable path (e.g., "steps.step1.output" or "shared_context.key")
-   */
-  private resolveVariable(varPath: string, context: ExecutionContext): any {
-    const parts = varPath.split(".");
-
-    if (parts[0] === "steps") {
-      // {{steps.step_name.output}}
-      if (parts.length < 2) return undefined;
-      const stepName = parts[1];
-      const result = ExecutionContextManager.getStepResult(context, stepName);
-
-      if (parts.length === 2) {
-        return result;
-      } else if (parts[2] === "output") {
-        return result?.output;
-      } else if (parts[2] === "success") {
-        return result?.success;
-      } else if (parts[2] === "error") {
-        return result?.error;
-      }
-    } else if (parts[0] === "shared_context") {
-      // {{shared_context.key}}
-      if (parts.length < 2) return undefined;
-      return ExecutionContextManager.getShared(context, parts[1]);
-    } else if (parts[0] === "env") {
-      // {{env.VAR}}
-      if (parts.length < 2) return undefined;
-      return ExecutionContextManager.getEnv(context, parts[1]);
-    } else {
-      // Direct reference to initial args: {{var}}
-      return context.initialArgs[parts[0]];
-    }
-
-    return undefined;
   }
 
   /**
@@ -326,7 +254,7 @@ export class PipelineEngine {
       for (let i = 0; i < retries; i++) {
         this.logger.debug(`Retry attempt ${i + 1}/${retries} for step '${step.step}'`);
 
-        const resolvedArgs = this.resolveTemplateVars(step.args || {}, context);
+        const resolvedArgs = this.templateResolver.resolve(step.args || {}, context);
         const result = await this.executeStep(step, resolvedArgs, context);
 
         if (result.success) {
