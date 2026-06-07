@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import * as yaml from "js-yaml";
 import { WorkerYaml } from "./types.js";
 
 /**
@@ -80,7 +81,6 @@ export class V2CompatibilityLayer {
 
     // Try to load existing worker.yaml (v3 agent)
     if (fs.existsSync(workerYamlPath)) {
-      const yaml = require("js-yaml");
       return yaml.load(fs.readFileSync(workerYamlPath, "utf-8")) as WorkerYaml;
     }
 
@@ -130,7 +130,6 @@ export class V2CompatibilityLayer {
    * Useful for migrating agents permanently
    */
   generateWorkerYamlFile(agentJsonPath: string, outputPath?: string): string {
-    const yaml = require("js-yaml");
     const agentDir = path.dirname(agentJsonPath);
     const workerYaml = this.convertToV3WorkerYaml(agentJsonPath);
 

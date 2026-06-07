@@ -56,47 +56,53 @@ export async function installAgent(
   const entries: InstallEntry[] = [];
 
   for (const { root, level: lvl } of bases) {
-    for (const [templatePath, _desc] of Object.entries(install)) {
-      // Replace template placeholders
-      let relPath = templatePath
-        .replace(/\{agent_name\}/g, agentName)
-        .replace(/\{slug\}/g, slug);
+    // Match install entry to the correct level
+    const installKey = lvl === "project" ? "project_level" : "user_level";
+    const templatePath = install[installKey];
+    if (!templatePath) continue;
 
-      const absPath = join(root, relPath);
+    // Replace template placeholders
+    let relPath = templatePath
+      .replace(/\{agent_name\}/g, agentName)
+      .replace(/\{slug\}/g, slug);
 
-      if (dryRun) {
+    // Strip leading ~/ for user-level paths (root is already homedir)
+    relPath = relPath.replace(/^~\//, "");
+
+    const absPath = join(root, relPath);
+
+    if (dryRun) {
+      entries.push({
+        tool: targetTool,
+        path: absPath,
+        level: lvl,
+        status: "dry-run",
+      });
+    } else {
+      try {
+        await mkdir(dirname(absPath), { recursive: true });
+        // Check if this is an append-mode template (CONVENTIONS.md / AGENTS.md)
+        if (
+          relPath === "CONVENTIONS.md" ||
+          relPath === "AGENTS.md"
+        ) {
+          await appendFile(absPath, content, "utf8");
+        } else {
+          await writeFile(absPath, content, "utf8");
+        }
         entries.push({
           tool: targetTool,
           path: absPath,
           level: lvl,
-          status: "dry-run",
+          status: "installed",
         });
-      } else {
-        try {
-          await mkdir(dirname(absPath), { recursive: true });
-          // Check if this is an append-mode template (CONVENTIONS.md / AGENTS.md)
-          if (
-            relPath === "CONVENTIONS.md" ||
-            relPath === "AGENTS.md"
-          ) {
-            await appendFile(absPath, content, "utf8");
-          } else {
-            await writeFile(absPath, content, "utf8");
-          }
-          entries.push({
-            tool: targetTool,
-            path: absPath,
-            level: lvl,
-            status: "installed",
-          });
-        } catch (err: any) {
-          entries.push({
-            tool: targetTool,
-            path: absPath,
-            level: lvl,
-            status: `error: ${err.message}`,
-          });
-        }
+      } catch (err: any) {
+        entries.push({
+          tool: targetTool,
+          path: absPath,
+          level: lvl,
+          status: `error: ${err.message}`,
+        });
       }
     }
   }

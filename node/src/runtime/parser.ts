@@ -94,7 +94,8 @@ export class WorkerYamlParser {
         "glob",
         "llm_chat",
         "web_fetch",
-        "web_search"
+        "web_search",
+        "invoke_agent",  // Add new builtin tool
       ]);
 
       for (let i = 0; i < workerYaml.pipeline.length; i++) {

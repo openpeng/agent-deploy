@@ -1,0 +1,21 @@
+{
+  "schema_version": "3.0",
+  "identity": {
+    "name": "data-processor-agent",
+    "version": "1.0.0",
+    "display_name": "数据处理 Agent",
+    "description": "处理数据并通过通知 Agent 发送完成通知",
+    "author": "Agent Deploy Team",
+    "tags": ["data", "processing", "orchestration"]
+  },
+  "entry": {
+    "main_subagent": "worker"
+  },
+  "category": "productivity",
+  "type": "agent",
+  "dependencies": {
+    "agents": {
+      "notification-agent": "^1.0.0"
+    }
+  }
+}

@@ -1,9 +1,32 @@
 /**
  * Memory System Integration
  *
- * Provides interfaces for persistent memory storage and retrieval.
- * Memory is stored per-agent and persists across pipeline executions.
+ * Provides persistent key-value memory for agents across pipeline executions.
+ * Storage backend: JSON files under <agentDir>/.memory/
+ *
+ * Pipeline usage:
+ *   - step: save
+ *     tool: memory
+ *     args:
+ *       operation: set
+ *       key: last_file
+ *       value: "{{file_path}}"
+ *
+ *   - step: recall
+ *     tool: memory
+ *     args:
+ *       operation: get
+ *       key: last_file
+ *     output: previous_file
  */
+
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 export interface MemoryEntry {
   key: string;
@@ -20,160 +43,178 @@ export interface MemoryQuery {
   limit?: number;
 }
 
-/**
- * Memory Store Interface
- * Abstract interface for different memory backends
- */
 export interface MemoryStore {
-  /**
-   * Store a value in memory
-   */
   set(key: string, value: any, metadata?: Record<string, any>): Promise<void>;
-
-  /**
-   * Retrieve a value from memory
-   */
   get(key: string): Promise<any>;
-
-  /**
-   * Query memory entries
-   */
   query(query: MemoryQuery): Promise<MemoryEntry[]>;
-
-  /**
-   * Delete memory entry
-   */
   delete(key: string): Promise<void>;
-
-  /**
-   * Clear all memory
-   */
   clear(): Promise<void>;
 }
 
-/**
- * File-based Memory Store
- * Stores memory in JSON files on disk
- */
+// ---------------------------------------------------------------------------
+// FileMemoryStore
+// ---------------------------------------------------------------------------
+
 export class FileMemoryStore implements MemoryStore {
   private memoryDir: string;
 
   constructor(agentDir: string) {
-    this.memoryDir = `${agentDir}/.memory`;
+    // Per-agent memory under <agentDir>/.memory/
+    this.memoryDir = path.join(agentDir, ".memory");
+  }
+
+  private ensureDir(): void {
+    if (!fs.existsSync(this.memoryDir)) {
+      fs.mkdirSync(this.memoryDir, { recursive: true });
+    }
+  }
+
+  // Sanitise key → safe filename: replace path separators and dots
+  private keyToFile(key: string): string {
+    return path.join(this.memoryDir, key.replace(/[/\\:*?"<>|]/g, "_") + ".json");
   }
 
   async set(key: string, value: any, metadata?: Record<string, any>): Promise<void> {
-    // TODO: Implement file-based storage
-    // 1. Ensure .memory directory exists
-    // 2. Write entry to .memory/<key>.json
-    // 3. Include timestamp and metadata
-    throw new Error("Memory set not implemented yet");
+    this.ensureDir();
+    const entry: MemoryEntry = { key, value, timestamp: Date.now(), metadata };
+    fs.writeFileSync(this.keyToFile(key), JSON.stringify(entry, null, 2), "utf-8");
   }
 
   async get(key: string): Promise<any> {
-    // TODO: Implement file-based retrieval
-    // 1. Read .memory/<key>.json
-    // 2. Return value
-    throw new Error("Memory get not implemented yet");
+    const file = this.keyToFile(key);
+    if (!fs.existsSync(file)) return undefined;
+    const entry: MemoryEntry = JSON.parse(fs.readFileSync(file, "utf-8"));
+    return entry.value;
   }
 
   async query(query: MemoryQuery): Promise<MemoryEntry[]> {
-    // TODO: Implement query logic
-    // 1. Scan .memory directory
-    // 2. Filter by query criteria
-    // 3. Return matching entries
-    return [];
+    if (!fs.existsSync(this.memoryDir)) return [];
+
+    let entries: MemoryEntry[] = [];
+
+    for (const file of fs.readdirSync(this.memoryDir)) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const entry: MemoryEntry = JSON.parse(
+          fs.readFileSync(path.join(this.memoryDir, file), "utf-8")
+        );
+
+        // Filter by exact key
+        if (query.key && entry.key !== query.key) continue;
+
+        // Filter by glob-style pattern (only * wildcard supported)
+        if (query.pattern) {
+          const re = new RegExp("^" + query.pattern.replace(/\*/g, ".*") + "$");
+          if (!re.test(entry.key)) continue;
+        }
+
+        // Filter by since timestamp
+        if (query.since && entry.timestamp < query.since) continue;
+
+        // Filter by tags (stored in metadata.tags)
+        if (query.tags && query.tags.length > 0) {
+          const entryTags: string[] = entry.metadata?.tags || [];
+          if (!query.tags.every(t => entryTags.includes(t))) continue;
+        }
+
+        entries.push(entry);
+      } catch {
+        // Skip corrupted entries
+      }
+    }
+
+    // Sort newest-first
+    entries.sort((a, b) => b.timestamp - a.timestamp);
+
+    if (query.limit && query.limit > 0) {
+      entries = entries.slice(0, query.limit);
+    }
+
+    return entries;
   }
 
   async delete(key: string): Promise<void> {
-    // TODO: Implement deletion
-    throw new Error("Memory delete not implemented yet");
+    const file = this.keyToFile(key);
+    if (fs.existsSync(file)) fs.unlinkSync(file);
   }
 
   async clear(): Promise<void> {
-    // TODO: Implement clear all
-    throw new Error("Memory clear not implemented yet");
+    if (!fs.existsSync(this.memoryDir)) return;
+    for (const file of fs.readdirSync(this.memoryDir)) {
+      if (file.endsWith(".json")) {
+        fs.unlinkSync(path.join(this.memoryDir, file));
+      }
+    }
   }
 }
 
-/**
- * Memory Tool
- * Provides memory operations as a tool for pipelines
- */
+// ---------------------------------------------------------------------------
+// MemoryTool — single tool exposing all operations
+// ---------------------------------------------------------------------------
+
 export class MemoryTool {
-  name = "memory";
+  readonly name = "memory";
   private store: MemoryStore;
 
   constructor(store: MemoryStore) {
     this.store = store;
   }
 
-  async execute(args: {
-    operation: "set" | "get" | "query" | "delete";
-    key?: string;
-    value?: any;
-    query?: MemoryQuery;
-    metadata?: Record<string, any>;
-  }, context: any): Promise<any> {
+  async execute(
+    args: {
+      operation: "set" | "get" | "query" | "delete" | "clear";
+      key?: string;
+      value?: any;
+      query?: MemoryQuery;
+      metadata?: Record<string, any>;
+    },
+    _context: any
+  ): Promise<any> {
     switch (args.operation) {
-      case "set":
+      case "set": {
         if (!args.key || args.value === undefined) {
-          throw new Error("memory: 'key' and 'value' required for set operation");
+          throw new Error("memory: 'key' and 'value' are required for set");
         }
         await this.store.set(args.key, args.value, args.metadata);
-        return { success: true };
+        return { success: true, key: args.key };
+      }
 
-      case "get":
-        if (!args.key) {
-          throw new Error("memory: 'key' required for get operation");
-        }
+      case "get": {
+        if (!args.key) throw new Error("memory: 'key' is required for get");
         const value = await this.store.get(args.key);
-        return { value };
+        return { value, found: value !== undefined };
+      }
 
-      case "query":
+      case "query": {
         const results = await this.store.query(args.query || {});
-        return { results };
+        return { results, count: results.length };
+      }
 
-      case "delete":
-        if (!args.key) {
-          throw new Error("memory: 'key' required for delete operation");
-        }
+      case "delete": {
+        if (!args.key) throw new Error("memory: 'key' is required for delete");
         await this.store.delete(args.key);
+        return { success: true, key: args.key };
+      }
+
+      case "clear": {
+        await this.store.clear();
         return { success: true };
+      }
 
       default:
-        throw new Error(`memory: Unknown operation: ${args.operation}`);
+        throw new Error(`memory: unknown operation '${(args as any).operation}'`);
     }
   }
 }
 
+// ---------------------------------------------------------------------------
+// Factory helper used by CLI
+// ---------------------------------------------------------------------------
+
 /**
- * Example usage:
- *
- * // In worker.yaml:
- * pipeline:
- *   - step: save_state
- *     tool: memory
- *     args:
- *       operation: set
- *       key: "last_processed_file"
- *       value: "{{file_path}}"
- *       metadata:
- *         timestamp: "{{timestamp}}"
- *
- *   - step: recall_state
- *     tool: memory
- *     args:
- *       operation: get
- *       key: "last_processed_file"
- *     output: previous_file
- *
- *   - step: query_history
- *     tool: memory
- *     args:
- *       operation: query
- *       query:
- *         pattern: "processed_*"
- *         limit: 10
- *     output: history
+ * Create and register a MemoryTool bound to the agent's directory.
  */
+export function registerMemoryTool(agentDir: string, registry: any): void {
+  const store = new FileMemoryStore(agentDir);
+  registry.register(new MemoryTool(store));
+}

@@ -12,11 +12,12 @@ export class ExecutionContextManager {
     initialArgs: Record<string, any>;
     cwd?: string;
     env?: Record<string, string>;
+    sharedContext?: Record<string, any>;
   }): ExecutionContext {
     return {
       agent: options.agent,
       initialArgs: options.initialArgs,
-      sharedContext: {},
+      sharedContext: options.sharedContext ? { ...options.sharedContext } : {},
       steps: new Map<string, StepResult>(),
       env: options.env || (process.env as Record<string, string>),
       cwd: options.cwd || process.cwd(),

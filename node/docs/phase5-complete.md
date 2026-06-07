@@ -160,6 +160,58 @@ agent-deploy run ./my-agent --args '{"input": "data"}' -v
 | Other | 12 | ✅ |
 | **Total** | **345** | **✅** |
 
+## 🆕 Latest Additions (2026-06-07)
+
+### Task 5.10: `use` CLI Command - 一键下载安装
+
+新增 `agent-deploy use` 命令，整合从市场下载 + 适配 + 安装到一站式体验：
+
+```bash
+# 从市场下载并安装
+agent-deploy use notification-agent
+
+# 本地 Agent 直接安装
+agent-deploy use ./test-agents/pilotdeck-agent
+```
+
+**流程**：
+1. 智能判断输入是本地目录还是 Market ID
+2. Market ID → 自动下载 → 适配 → 安装
+3. 本地目录 → 直接适配 → 安装
+4. 自动检测已安装的 AI 工具 + 强制包含 `codebuddy_agent`
+5. 输出清晰的安装摘要和使用指引
+
+### Bug Fix: `install.ts` 路径解析
+
+**问题**：原代码遍历 `install` YAML 的 key（`project_level`/`user_level`）作为文件路径，导致写入错误位置。
+
+**修复**：按安装级别匹配对应路径模板，`~` 自动展开为 homedir：
+```typescript
+const installKey = lvl === "project" ? "project_level" : "user_level";
+const templatePath = install[installKey];
+relPath = templatePath.replace(/^~\//, "");  // 展开 ~
+```
+
+### Enhanced `codebuddy_agent` Adapter
+
+`adapt.ts` 的 `codebuddy_agent` 适配器现在包含 pipeline 执行信息：
+
+- 自动检测 `worker.yaml` pipeline（直接文件或 subagent 入口）
+- 生成 **Pipeline** 段落，列出参数和步骤
+- CC 可直接了解 Agent 的执行能力
+
+### E2E 验证：notification-agent 端到端
+
+```
+Market (localhost:8321) → agent-deploy use → .codebuddy/agents/
+
+1. notification-agent 已存在于 Market
+2. agent-deploy use notification-agent → 下载 + 安装
+3. 安装到 codebuddy_agent + codebuddy + claude_code 3 个目标
+4. .codebuddy/agents/notification-agent.md 包含完整 pipeline 说明
+5. data-processor-agent 自主 invoke_agent("notification-agent") → Bark 通知推送成功
+```
+
 ## 🚀 Usage Examples
 
 ### Basic Agent Execution

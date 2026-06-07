@@ -32,7 +32,12 @@ import { GlobTool } from "./runtime/tools/glob.js";
 import { LLMChatTool } from "./runtime/tools/llm-chat.js";
 import { WebFetchTool } from "./runtime/tools/web-fetch.js";
 import { WebSearchTool } from "./runtime/tools/web-search.js";
+import { invokeAgentTool } from "./runtime/builtin-tools/invoke-agent.js";
 import { V2CompatibilityLayer } from "./runtime/v2-compat.js";
+import { MCPToolLoader } from "./runtime/mcp-integration.js";
+import { SkillLoader } from "./runtime/skill-integration.js";
+import { registerMemoryTool } from "./runtime/memory-integration.js";
+import { DependencyResolver } from "./runtime/dependency-resolver.js";
 
 const VERSION = "1.0.0";
 
@@ -48,6 +53,7 @@ Usage:
   agent-deploy upload <agent-dir> [options]
   agent-deploy deploy <agent-dir> [options]
   agent-deploy run <agent-dir> [options]
+  agent-deploy use <agent-id|agent-dir> [options]
   agent-deploy list [options]
   agent-deploy search <query> [options]
   agent-deploy info <agent-id> [options]
@@ -61,6 +67,7 @@ Commands:
   upload <agent-dir>    Upload agent to Market
   deploy <agent-dir>    Deploy agent to AI coding tool(s)
   run <agent-dir>       Execute agent with runtime engine
+  use <agent-id|dir>    Download from market + adapt + install in one step
   list                  List local agents
   search <query>        Search agents in Market
   info <agent-id>       Show detailed agent information
@@ -91,6 +98,12 @@ Run Options:
   --cwd <dir>           Working directory for agent execution (default: agent directory)
   --env <json>          Environment variables (JSON object)
   -v, --verbose         Verbose output (show step details)
+  -h, --help            Show this help message
+
+Use Options:
+  -m, --market <url>    Market API URL (for downloading from market)
+  -o, --output <dir>    Download output directory (default: ./downloaded-agents)
+  -l, --level <level>   Install level: project, user, or both (default: both)
   -h, --help            Show this help message
 
 List Options:
@@ -129,6 +142,11 @@ Examples:
   agent-deploy run ./agents/my-agent
   agent-deploy run ./agents/my-agent --args '{"input": "data"}'
   agent-deploy run ./agents/my-agent --verbose
+
+  # Download and install agent from Market
+  agent-deploy use my-agent
+  agent-deploy use my-agent -m http://market.example.com
+  agent-deploy use ./test-agents/my-agent
 
   # List local agents
   agent-deploy list
@@ -809,9 +827,9 @@ async function handleRunCommand(args: string[]) {
     const { values, positionals } = parseArgs({
       args,
       options: {
-        args: { type: "string" },
+        args: { type: "string", multiple: true },
         cwd: { type: "string" },
-        env: { type: "string" },
+        env: { type: "string", multiple: true },
         verbose: { type: "boolean", short: "v", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
@@ -828,15 +846,16 @@ Arguments:
   <agent-dir>           Path to agent directory (containing agent.json and worker.yaml)
 
 Options:
-  --args <json>         Arguments to pass to agent (JSON object)
+  --args <key=value>    Arguments to pass to agent (key=value or JSON object, repeatable)
   --cwd <dir>           Working directory for agent execution (default: agent directory)
-  --env <json>          Environment variables (JSON object)
+  --env <key=value>     Environment variables (key=value or JSON object, repeatable)
   -v, --verbose         Verbose output (show step details)
   -h, --help            Show this help message
 
 Examples:
   agent-deploy run ./agents/my-agent
-  agent-deploy run ./agents/processor --args '{"input": "data.txt"}'
+  agent-deploy run ./agents/processor --args file_path=data.txt --args lang=en
+  agent-deploy run ./agents/processor --args '{"file_path":"data.txt"}'
   agent-deploy run ./agents/builder --cwd ./project --verbose
       `);
       return;
@@ -884,27 +903,57 @@ Examples:
       throw new Error(`Failed to load agent: ${(error as Error).message}`);
     }
 
-    // Parse arguments
+    // Parse arguments: supports --args '{"key":"val"}' or --args key=value (multiple)
     let initialArgs: Record<string, any> = {};
     if (values.args) {
-      try {
-        initialArgs = JSON.parse(values.args as string);
-      } catch (error) {
-        console.error("❌ Error: Invalid JSON for --args");
-        console.error(`   ${(error as Error).message}`);
-        process.exit(1);
+      const argsList = values.args as string[];
+      // Single JSON object
+      if (argsList.length === 1 && argsList[0].trimStart().startsWith("{")) {
+        try {
+          initialArgs = JSON.parse(argsList[0]);
+        } catch (error) {
+          console.error("❌ Error: Invalid JSON for --args");
+          console.error(`   ${(error as Error).message}`);
+          process.exit(1);
+        }
+      } else {
+        // key=value pairs (one or more --args)
+        for (const entry of argsList) {
+          const eq = entry.indexOf("=");
+          if (eq === -1) {
+            initialArgs[entry] = true;
+          } else {
+            const k = entry.slice(0, eq);
+            const v = entry.slice(eq + 1);
+            // Try to coerce numbers and booleans
+            if (v === "true") initialArgs[k] = true;
+            else if (v === "false") initialArgs[k] = false;
+            else if (!isNaN(Number(v)) && v !== "") initialArgs[k] = Number(v);
+            else initialArgs[k] = v;
+          }
+        }
       }
     }
 
-    // Parse environment variables
+    // Parse environment variables: supports --env '{"KEY":"val"}' or --env KEY=value
     let envVars: Record<string, string> = {};
     if (values.env) {
-      try {
-        envVars = JSON.parse(values.env as string);
-      } catch (error) {
-        console.error("❌ Error: Invalid JSON for --env");
-        console.error(`   ${(error as Error).message}`);
-        process.exit(1);
+      const envList = values.env as string[];
+      if (envList.length === 1 && envList[0].trimStart().startsWith("{")) {
+        try {
+          envVars = JSON.parse(envList[0]);
+        } catch (error) {
+          console.error("❌ Error: Invalid JSON for --env");
+          console.error(`   ${(error as Error).message}`);
+          process.exit(1);
+        }
+      } else {
+        for (const entry of envList) {
+          const eq = entry.indexOf("=");
+          if (eq !== -1) {
+            envVars[entry.slice(0, eq)] = entry.slice(eq + 1);
+          }
+        }
       }
     }
 
@@ -932,14 +981,50 @@ Examples:
     registry.register(new LLMChatTool());
     registry.register(new WebFetchTool());
     registry.register(new WebSearchTool());
+    registry.register(invokeAgentTool);
 
-    // Create execution context
+    // Register MCP tools from agent's mcp/ directory (non-fatal if unavailable)
+    const mcpLoader = new MCPToolLoader();
+    await mcpLoader.registerMCPTools(resolvedAgentDir, registry);
+
+    // Register skills from agent's skills/ directory
+    const skillLoader = new SkillLoader();
+    skillLoader.registerSkills(resolvedAgentDir, registry);
+
+    // Register memory tool bound to agent directory
+    registerMemoryTool(resolvedAgentDir, registry);
+
+    // Create execution context, seeding sharedContext from worker.yaml
     const context = ExecutionContextManager.create({
       agent: { name: agentName },
       initialArgs,
       cwd: workingDir,
       env: envVars,
+      sharedContext: workerYaml.shared_context || {},
     });
+
+    // Attach registry to context for invoke_agent (Phase 6 improvement)
+    ToolRegistry.attach(registry, context);
+
+    // Resolve dependencies declared in agent.json (Phase 6.3)
+    const resolver = new DependencyResolver();
+    try {
+      console.log("📦 Resolving dependencies...");
+      const deps = await resolver.resolve(resolvedAgentDir);
+
+      if (deps.size > 0) {
+        console.log(`  Dependencies found: ${deps.size}`);
+        for (const [name, dep] of deps) {
+          const sourceLabel = dep.source === "cache" ? "cached" : "downloaded";
+          console.log(`    ✓ ${name}@${dep.version} (${sourceLabel})`);
+        }
+        console.log();
+      }
+    } catch (error) {
+      // Dependency resolution failure is non-fatal — continues with execution
+      console.log(`  ⚠️  Dependency resolution: ${(error as Error).message}`);
+      console.log();
+    }
 
     // Create pipeline engine with optional verbose logging
     const logger = new ConsoleLogger(values.verbose as boolean);
@@ -980,6 +1065,169 @@ Examples:
     }
   } catch (error) {
     handleCommandError(error as Error, "run");
+  }
+}
+
+/**
+ * Handle use command - download from market + adapt + install
+ */
+async function handleUseCommand(args: string[]) {
+  try {
+    // Parse arguments
+    const { values, positionals } = parseArgs({
+      args,
+      options: {
+        market: { type: "string", short: "m" },
+        output: { type: "string", short: "o" },
+        level: { type: "string", short: "l", default: "both" },
+        help: { type: "boolean", short: "h", default: false },
+      },
+      allowPositionals: true,
+    });
+
+    if (values.help) {
+      console.log(`
+Usage: agent-deploy use <agent-id|agent-dir> [options]
+
+Download from Market (if needed), adapt, and install agent to all detected AI tools.
+This is the fastest way to make a Market agent directly usable.
+
+Arguments:
+  <agent-id|agent-dir>  Agent ID (Market) or local agent directory
+
+Options:
+  -m, --market <url>    Market API URL (default: $MARKET_API_URL or http://localhost:8321)
+  -o, --output <dir>    Download output directory (default: ./downloaded-agents)
+  -l, --level <level>   Install level: project, user, or both (default: both)
+  -h, --help            Show this help message
+
+Examples:
+  agent-deploy use my-agent
+  agent-deploy use code-reviewer -m http://market.example.com
+  agent-deploy use ./test-agents/pilotdeck-agent
+      `);
+      return;
+    }
+
+    const input = positionals[0];
+    if (!input) {
+      console.error("❌ Error: agent ID or directory is required\n");
+      console.error("Usage: agent-deploy use <agent-id|agent-dir> [options]");
+      console.error("Run 'agent-deploy use --help' for more information");
+      process.exit(1);
+    }
+
+    const level = (values.level as string) || "both";
+    let agentPath: string;
+
+    // Determine if input is a local directory or a market agent ID
+    const localCandidate = resolve(input);
+    if (existsSync(localCandidate) && existsSync(path.join(localCandidate, "agent.json"))) {
+      // Local directory mode
+      agentPath = localCandidate;
+      console.log(`📂 Using local agent: ${input}\n`);
+    } else {
+      // Market download mode
+      console.log(`📥 Downloading agent from Market: ${input}...\n`);
+
+      const marketUrl = values.market as string || process.env.MARKET_API_URL || "http://localhost:8321";
+      const outputDir = values.output ? resolve(values.output as string) : resolve("./downloaded-agents");
+
+      const result = await downloadAgent({
+        agentId: input,
+        outputDir,
+        marketUrl,
+      });
+
+      agentPath = result.output_path;
+      console.log(`✅ Downloaded to: ${agentPath}\n`);
+    }
+
+    // Verify agent.json exists
+    const agentJsonPath = path.join(agentPath, "agent.json");
+    if (!existsSync(agentJsonPath)) {
+      throw ErrorHandlers.missingAgentJson(agentPath);
+    }
+
+    // Read agent metadata
+    const agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
+    const agentName = agentJson.identity?.name || agentJson.name || path.basename(agentPath);
+
+    // Auto-detect installed tools, always include codebuddy_agent
+    const detected = detectAll();
+    const toolsToInstall = new Set<string>();
+
+    // Always include codebuddy_agent
+    toolsToInstall.add("codebuddy_agent");
+
+    // Add detected tools
+    for (const d of detected) {
+      toolsToInstall.add(d.tool);
+    }
+    // Also add codebuddy (skill format) if codebuddy_agent is included
+    if (detected.some(d => d.tool === "codebuddy")) {
+      toolsToInstall.add("codebuddy");
+    }
+
+    const installList = Array.from(toolsToInstall);
+    console.log(`🔧 Installing to ${installList.length} target(s): ${installList.join(", ")}\n`);
+
+    // Deploy to each tool
+    const results: Array<{ tool: string; success: boolean; error?: string }> = [];
+
+    for (const tool of installList) {
+      try {
+        const toolLabel = tool === "codebuddy_agent" ? `${tool} (CC Agent)` : tool;
+        console.log(`📦 Deploying to ${toolLabel}...`);
+
+        // Adapt agent
+        const adapted = adaptAgent(agentPath, tool);
+
+        // Install agent
+        await installAgent(adapted.content, agentName, tool, level, false);
+
+        console.log(`✅ Successfully deployed to ${toolLabel}\n`);
+        results.push({ tool, success: true });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error(`❌ Failed to deploy to ${tool}: ${msg}\n`);
+        results.push({ tool, success: false, error: msg });
+      }
+    }
+
+    // Summary
+    const successful = results.filter(r => r.success).length;
+    const failed = results.filter(r => !r.success).length;
+
+    console.log("=".repeat(50));
+    console.log(`📊 Installation Summary:`);
+    console.log(`   ✅ Successful: ${successful}`);
+    console.log(`   ❌ Failed: ${failed}`);
+    console.log(`   📍 Total: ${results.length}`);
+
+    if (failed > 0) {
+      console.log("\nFailed installations:");
+      results.filter(r => !r.success).forEach(r => {
+        console.log(`   - ${r.tool}: ${r.error}`);
+      });
+    }
+
+    if (successful > 0) {
+      console.log(`\n🎉 Agent "${agentName}" is ready to use!`);
+      console.log("\nHow to use:");
+      const hasCCAgent = results.some(r => r.success && r.tool === "codebuddy_agent");
+      if (hasCCAgent) {
+        console.log(`   - CC: Restart CodeBuddy Code to discover the agent`);
+        console.log(`   - CC: The agent will appear in .codebuddy/agents/${agentName}.md`);
+      }
+      console.log(`   - Run pipeline: agent-deploy run ${agentPath}`);
+    }
+
+    if (failed === results.length) {
+      process.exit(1);
+    }
+  } catch (error) {
+    handleCommandError(error as Error, 'use');
   }
 }
 
@@ -1086,6 +1334,8 @@ async function main() {
     await handleDeployCommand(args.slice(1));
   } else if (command === "run") {
     await handleRunCommand(args.slice(1));
+  } else if (command === "use") {
+    await handleUseCommand(args.slice(1));
   } else if (command === "list") {
     await handleListCommand(args.slice(1));
   } else if (command === "search") {
@@ -1098,7 +1348,7 @@ async function main() {
     await handleTemplatesCommand(args.slice(1));
   } else {
     console.error(`❌ Unknown command: ${command}\n`);
-    console.error("Available commands: import, upload, deploy, run, list, search, info, init, templates");
+    console.error("Available commands: import, upload, deploy, run, use, list, search, info, init, templates");
     console.error("Run 'agent-deploy --help' for more information");
     process.exit(1);
   }

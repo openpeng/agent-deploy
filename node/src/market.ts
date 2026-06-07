@@ -9,6 +9,7 @@
 
 import fs from "fs";
 import path from "path";
+import os from "os";
 import FormData from "form-data";
 import { AgentJsonV2 } from "./types.js";
 import { ErrorHandlers } from "./errors.js";
@@ -141,7 +142,7 @@ export class MarketClient {
       };
 
       if (apiKey) {
-        headers["X-API-Key"] = apiKey;
+        headers["Authorization"] = `Bearer ${apiKey}`;
       }
 
       const response = await fetch(`${marketUrl}/api/v1/agents`, {
@@ -294,7 +295,7 @@ export class MarketClient {
    */
   private async packAgent(agentDir: string, agentName: string, version: string): Promise<string> {
     const tar = await import("tar");
-    const tmpDir = fs.mkdtempSync(path.join(require("os").tmpdir(), "agent-deploy-"));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-deploy-"));
     const packagePath = path.join(tmpDir, `${agentName}-v${version}.tar.gz`);
 
     await tar.create(

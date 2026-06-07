@@ -99,6 +99,21 @@ export class ToolRegistry {
   }
 
   /**
+   * Attach a registry to an execution context for tool inheritance
+   */
+  static attach(registry: ToolRegistry, context: any): void {
+    context.__registry = registry;
+  }
+
+  /**
+   * Retrieve a registry from an execution context
+   * @returns ToolRegistry or undefined if not attached
+   */
+  static from(context: any): ToolRegistry | undefined {
+    return context.__registry;
+  }
+
+  /**
    * Unregister a tool from this registry (does not affect parent)
    * @param name Tool name
    * @returns true if tool was removed, false if not found

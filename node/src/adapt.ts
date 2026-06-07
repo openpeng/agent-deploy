@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { loadRegistry } from "./registry.js";
+import * as yaml from "js-yaml";
 
 /** Regex to detect YAML frontmatter delimited by --- */
 const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---\n/;
@@ -247,6 +248,77 @@ function parseYamlFrontmatter(yaml: string): Record<string, any> {
 }
 
 /**
+ * Load and translate worker.yaml pipeline into executable CC prompt instructions.
+ * Returns null if no worker.yaml found or parsing fails.
+ */
+function loadWorkerYamlAsPrompt(agentPath: string, subagentPath: string): string | null {
+  const yamlPath = join(agentPath, subagentPath);
+  if (!existsSync(yamlPath)) return null;
+
+  let parsed: any;
+  try {
+    const content = readFileSync(yamlPath, "utf8");
+    parsed = yaml.load(content);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || !Array.isArray(parsed.pipeline)) return null;
+
+  const toolInstructions: Record<string, (args: any) => string> = {
+    write_file: (args: any) =>
+      `Write the following content to file \`${args.path}\`:\n\`\`\`\n${args.content}\n\`\`\`${args.mode === "append" ? "\n(append to existing file)" : ""}`,
+    web_fetch: (args: any) =>
+      `Fetch URL via HTTP ${args.method || "GET"}: \`${args.url}\``,
+    bash: (args: any) =>
+      `Run shell command:\n\`\`\`bash\n${args.command}\n\`\`\``,
+    read_file: (args: any) =>
+      `Read file: \`${args.path}\``,
+    glob: (args: any) =>
+      `Find files matching pattern: \`${args.pattern}\``,
+    llm_chat: (args: any) =>
+      `Ask LLM: ${args.prompt}`,
+    web_search: (args: any) =>
+      `Search the web for: ${args.query}`,
+  };
+
+  // Extract all {{varName}} template variables from args, excluding steps.* and shared_context keys
+  const varPattern = /\{\{([^}]+)\}\}/g;
+  const allVars = new Set<string>();
+  const sharedKeys = new Set(Object.keys(parsed.shared_context || {}));
+  for (const step of parsed.pipeline) {
+    const argsStr = JSON.stringify(step.args || {});
+    let m: RegExpExecArray | null;
+    while ((m = varPattern.exec(argsStr)) !== null) {
+      const v = m[1].trim();
+      if (!v.startsWith("steps.") && !v.startsWith("shared_context.") && !sharedKeys.has(v)) {
+        allVars.add(v);
+      }
+    }
+  }
+
+  const paramSection = allVars.size > 0
+    ? `## Parameters\n\nProvide the following values when invoking this agent (use \`$ARGUMENTS\` or pass as key=value):\n\n${[...allVars].map(v => `- \`${v}\``).join("\n")}\n\n`
+    : "";
+
+  const steps: string[] = parsed.pipeline.map((step: any, i: number) => {
+    const num = i + 1;
+    const toolFn = (toolInstructions as any)[step.tool];
+    const instruction = toolFn
+      ? toolFn(step.args || {})
+      : `Call tool \`${step.tool}\` with args: ${JSON.stringify(step.args || {})}`;
+    const outputNote = step.output ? ` Save result as \`${step.output}\`.` : "";
+    return `**Step ${num}: ${step.step}**\n${instruction}${outputNote}`;
+  });
+
+  const sharedCtx = parsed.shared_context
+    ? `\n\n**Shared context**: ${JSON.stringify(parsed.shared_context)}`
+    : "";
+
+  return paramSection + steps.join("\n\n") + sharedCtx;
+}
+
+/**
  * Generate a URL-safe slug from an agent name.
  */
 function slugify(name: string): string {
@@ -309,8 +381,49 @@ export function adaptAgent(agentPath: string, target: string): AdaptationResult 
     }
 
     case "codebuddy_agent": {
-      // NEW: Plain markdown file for CodeBuddy agents
-      const content = `# ${descriptor.displayName}\n\n**Version**: ${descriptor.version}\n**Description**: ${descriptor.description}\n\n${descriptor.instructions}\n\n---\n*Adapted from PilotDeck Market by agent-deploy v2.0*\n`;
+      // CodeBuddy Agent format - plain markdown with optional pipeline info
+      const agentJsonPath = join(agentPath, "agent.json");
+      let pipelineInfo = "";
+
+      // Check for worker.yaml pipeline (direct or via subagents)
+      if (existsSync(agentJsonPath)) {
+        try {
+          const agentJson = JSON.parse(readFileSync(agentJsonPath, "utf8"));
+          let pipelinePath: string | null = null;
+
+          // Check direct worker.yaml in agent dir
+          const directWorkerPath = join(agentPath, "worker.yaml");
+          if (existsSync(directWorkerPath)) {
+            pipelinePath = "worker.yaml";
+          }
+          // Check subagents for entry point
+          else if (agentJson.subagents && agentJson.subagents.length > 0) {
+            const entryName = agentJson.entry?.main_subagent || agentJson.subagents[0].name;
+            const entrySubagent = agentJson.subagents.find((s: any) => s.name === entryName) || agentJson.subagents[0];
+            if (entrySubagent && entrySubagent.path) {
+              pipelinePath = entrySubagent.path;
+            }
+          }
+
+          if (pipelinePath) {
+            const pipelinePrompt = loadWorkerYamlAsPrompt(agentPath, pipelinePath);
+            if (pipelinePrompt) {
+              pipelineInfo = `## Pipeline\n\n${pipelinePrompt}\n\n`;
+            }
+          }
+        } catch {
+          // ignore, fall through to basic instructions
+        }
+      }
+
+      const content =
+        `# ${descriptor.displayName}\n\n` +
+        `**Version**: ${descriptor.version}\n` +
+        `**Description**: ${descriptor.description}\n\n` +
+        pipelineInfo +
+        `${descriptor.instructions}\n\n` +
+        `---\n` +
+        `*Adapted from Agent Market by agent-deploy v${descriptor.version}*\n`;
       return {
         content,
         target_file: `.codebuddy/agents/${slug}.md`,
@@ -320,8 +433,27 @@ export function adaptAgent(agentPath: string, target: string): AdaptationResult 
     }
 
     case "claude_code": {
-      // Strip YAML, wrap with slash-command format.
-      const ccContent = `# /${slug} — ${descriptor.displayName}\n\n## Description\n\n${descriptor.description}\n\n${descriptor.instructions}`;
+      // Check if agent has subagents with worker.yaml pipeline — translate to executable prompt
+      const agentJsonPath = join(agentPath, "agent.json");
+      let pipelinePrompt: string | null = null;
+      if (existsSync(agentJsonPath)) {
+        try {
+          const agentJson = JSON.parse(readFileSync(agentJsonPath, "utf8"));
+          if (agentJson.subagents && agentJson.subagents.length > 0) {
+            const entrySubagentName = agentJson.entry?.main_subagent || agentJson.subagents[0].name;
+            const entrySubagent = agentJson.subagents.find((s: any) => s.name === entrySubagentName) || agentJson.subagents[0];
+            pipelinePrompt = loadWorkerYamlAsPrompt(agentPath, entrySubagent.path);
+          }
+        } catch {
+          // fall through to descriptor.instructions
+        }
+      }
+
+      const body = pipelinePrompt
+        ? `## Description\n\n${descriptor.description}\n\n## Steps\n\nExecute the following steps in order:\n\n${pipelinePrompt}`
+        : `## Description\n\n${descriptor.description}\n\n${descriptor.instructions}`;
+
+      const ccContent = `# /${slug} — ${descriptor.displayName}\n\n${body}`;
       return {
         content: ccContent,
         target_file: `.claude/commands/${slug}.md`,

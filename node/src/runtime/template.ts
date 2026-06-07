@@ -135,7 +135,7 @@ export class TemplateResolver {
   }
 
   /**
-   * Resolve initial args path
+   * Resolve initial args path, with fallback to sharedContext
    */
   private resolveInitialArgsPath(
     parts: string[],
@@ -147,6 +147,11 @@ export class TemplateResolver {
     // Support nested path like {{obj.nested.field}}
     if (parts.length > 1 && value && typeof value === "object") {
       return this.resolveNestedPath(value, parts.slice(1));
+    }
+
+    // Fallback: check sharedContext for bare {{key}} references
+    if (value === undefined && parts.length === 1) {
+      return context.sharedContext[parts[0]];
     }
 
     return value;
