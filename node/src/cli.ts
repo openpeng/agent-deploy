@@ -16,6 +16,7 @@ import { uploadAgent, downloadAgent, MarketClient, listLocalAgents } from "./mar
 import { adaptAgent } from "./adapt.js";
 import { installAgent } from "./install.js";
 import { detectAll } from "./detect.js";
+import { ErrorHandlers, handleCommandError, UserFriendlyError } from "./errors.js";
 
 const VERSION = "1.0.0";
 
@@ -205,9 +206,7 @@ async function handleImportCommand(args: string[]) {
       console.log("  3. Deploy to other AI tools with 'agent-deploy deploy'");
     }
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`❌ Import failed: ${msg}`);
-    process.exit(1);
+    handleCommandError(error as Error, 'import');
   }
 }
 
@@ -215,52 +214,49 @@ async function handleImportCommand(args: string[]) {
  * Handle upload command
  */
 async function handleUploadCommand(args: string[]) {
-  // Parse arguments
-  const { values, positionals } = parseArgs({
-    args,
-    options: {
-      market: { type: "string", short: "m" },
-      "api-key": { type: "string", short: "k" },
-      force: { type: "boolean", short: "f", default: false },
-      help: { type: "boolean", short: "h", default: false },
-    },
-    allowPositionals: true,
-  });
-
-  // Show help if requested
-  if (values.help) {
-    printHelp();
-    return;
-  }
-
-  // Get agent directory from positionals
-  const agentDir = positionals[0];
-
-  if (!agentDir) {
-    console.error("❌ Error: agent directory is required\n");
-    console.error("Usage: agent-deploy upload <agent-dir> [options]");
-    console.error("Run 'agent-deploy upload --help' for more information");
-    process.exit(1);
-  }
-
-  // Resolve path
-  const resolvedPath = resolve(agentDir);
-
-  // Verify directory exists
-  if (!existsSync(resolvedPath)) {
-    console.error(`❌ Error: agent directory not found: ${resolvedPath}`);
-    process.exit(1);
-  }
-
-  // Verify agent.json exists
-  const agentJsonPath = resolve(resolvedPath, "agent.json");
-  if (!existsSync(agentJsonPath)) {
-    console.error(`❌ Error: agent.json not found in ${resolvedPath}`);
-    console.error("\nMake sure the directory contains a valid agent.json file");
-    process.exit(1);
-  }
-
   try {
+    // Parse arguments
+    const { values, positionals } = parseArgs({
+      args,
+      options: {
+        market: { type: "string", short: "m" },
+        "api-key": { type: "string", short: "k" },
+        force: { type: "boolean", short: "f", default: false },
+        help: { type: "boolean", short: "h", default: false },
+      },
+      allowPositionals: true,
+    });
+
+    // Show help if requested
+    if (values.help) {
+      printHelp();
+      return;
+    }
+
+    // Get agent directory from positionals
+    const agentDir = positionals[0];
+
+    if (!agentDir) {
+      console.error("❌ Error: agent directory is required\n");
+      console.error("Usage: agent-deploy upload <agent-dir> [options]");
+      console.error("Run 'agent-deploy upload --help' for more information");
+      process.exit(1);
+    }
+
+    // Resolve path
+    const resolvedPath = resolve(agentDir);
+
+    // Verify directory exists
+    if (!existsSync(resolvedPath)) {
+      throw ErrorHandlers.fileNotFound(resolvedPath, 'directory');
+    }
+
+    // Verify agent.json exists
+    const agentJsonPath = resolve(resolvedPath, "agent.json");
+    if (!existsSync(agentJsonPath)) {
+      throw ErrorHandlers.missingAgentJson(resolvedPath);
+    }
+
     console.log("📤 Uploading agent to Market...\n");
 
     // Upload agent
@@ -282,18 +278,7 @@ async function handleUploadCommand(args: string[]) {
     console.log("  2. Deploy to AI tools with 'agent-deploy deploy'");
     console.log("  3. Check agent status in Market UI");
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`❌ Upload failed: ${msg}`);
-
-    if (msg.includes("401") || msg.includes("403")) {
-      console.error("\n💡 Hint: Make sure you have a valid API key");
-      console.error("   Set MARKET_API_KEY environment variable or use --api-key");
-    } else if (msg.includes("409")) {
-      console.error("\n💡 Hint: Agent version already exists");
-      console.error("   Use --force to overwrite, or update version in agent.json");
-    }
-
-    process.exit(1);
+    handleCommandError(error as Error, 'upload');
   }
 }
 
@@ -301,51 +286,48 @@ async function handleUploadCommand(args: string[]) {
  * Handle deploy command
  */
 async function handleDeployCommand(args: string[]) {
-  // Parse arguments
-  const { values, positionals } = parseArgs({
-    args,
-    options: {
-      tool: { type: "string", short: "t" },
-      level: { type: "string", short: "l", default: "both" },
-      help: { type: "boolean", short: "h", default: false },
-    },
-    allowPositionals: true,
-  });
-
-  // Show help if requested
-  if (values.help) {
-    printHelp();
-    return;
-  }
-
-  // Get agent directory from positionals
-  const agentDir = positionals[0];
-
-  if (!agentDir) {
-    console.error("❌ Error: agent directory is required\n");
-    console.error("Usage: agent-deploy deploy <agent-dir> [options]");
-    console.error("Run 'agent-deploy deploy --help' for more information");
-    process.exit(1);
-  }
-
-  // Resolve path
-  const resolvedPath = resolve(agentDir);
-
-  // Verify directory exists
-  if (!existsSync(resolvedPath)) {
-    console.error(`❌ Error: agent directory not found: ${resolvedPath}`);
-    process.exit(1);
-  }
-
-  // Verify agent.json exists
-  const agentJsonPath = resolve(resolvedPath, "agent.json");
-  if (!existsSync(agentJsonPath)) {
-    console.error(`❌ Error: agent.json not found in ${resolvedPath}`);
-    console.error("\nMake sure the directory contains a valid agent.json file");
-    process.exit(1);
-  }
-
   try {
+    // Parse arguments
+    const { values, positionals } = parseArgs({
+      args,
+      options: {
+        tool: { type: "string", short: "t" },
+        level: { type: "string", short: "l", default: "both" },
+        help: { type: "boolean", short: "h", default: false },
+      },
+      allowPositionals: true,
+    });
+
+    // Show help if requested
+    if (values.help) {
+      printHelp();
+      return;
+    }
+
+    // Get agent directory from positionals
+    const agentDir = positionals[0];
+
+    if (!agentDir) {
+      console.error("❌ Error: agent directory is required\n");
+      console.error("Usage: agent-deploy deploy <agent-dir> [options]");
+      console.error("Run 'agent-deploy deploy --help' for more information");
+      process.exit(1);
+    }
+
+    // Resolve path
+    const resolvedPath = resolve(agentDir);
+
+    // Verify directory exists
+    if (!existsSync(resolvedPath)) {
+      throw ErrorHandlers.fileNotFound(resolvedPath, 'directory');
+    }
+
+    // Verify agent.json exists
+    const agentJsonPath = resolve(resolvedPath, "agent.json");
+    if (!existsSync(agentJsonPath)) {
+      throw ErrorHandlers.missingAgentJson(resolvedPath);
+    }
+
     const targetTool = (values.tool as string) || "auto";
     const level = (values.level as string) || "both";
 
@@ -355,17 +337,14 @@ async function handleDeployCommand(args: string[]) {
     if (targetTool === "auto") {
       const detected = detectAll();
       if (detected.length === 0) {
-        console.error("❌ No AI coding tools detected");
-        console.error("\nPlease specify a tool with --tool option");
-        process.exit(1);
+        throw ErrorHandlers.toolNotDetected();
       }
       toolsToInstall = [detected[0].tool];
       console.log(`🔍 Auto-detected: ${detected[0].tool}\n`);
     } else if (targetTool === "all") {
       const detected = detectAll();
       if (detected.length === 0) {
-        console.error("❌ No AI coding tools detected");
-        process.exit(1);
+        throw ErrorHandlers.toolNotDetected();
       }
       toolsToInstall = detected.map(d => d.tool);
       console.log(`🔍 Detected ${detected.length} tool(s): ${toolsToInstall.join(", ")}\n`);
@@ -435,9 +414,7 @@ async function handleDeployCommand(args: string[]) {
       process.exit(1);
     }
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`❌ Deploy failed: ${msg}`);
-    process.exit(1);
+    handleCommandError(error as Error, 'deploy');
   }
 }
 
@@ -506,9 +483,7 @@ Examples:
 
     console.log(`Total: ${agents.length} agent(s)`);
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`❌ List failed: ${msg}`);
-    process.exit(1);
+    handleCommandError(error as Error, 'list');
   }
 }
 
@@ -603,15 +578,7 @@ Examples:
       console.log("💡 Use --limit to see more results");
     }
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`❌ Search failed: ${msg}`);
-
-    if (msg.includes('fetch') || msg.includes('ECONNREFUSED')) {
-      console.log("\n💡 Hint: Make sure the Market server is running");
-      console.log(`   Try: curl ${process.env.MARKET_API_URL || 'http://localhost:8321'}/api/v1/health`);
-    }
-
-    process.exit(1);
+    handleCommandError(error as Error, 'search');
   }
 }
 
@@ -720,16 +687,7 @@ Examples:
       console.log(`\n💡 Download with: agent-deploy download ${agent.id}`);
     }
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`❌ Info failed: ${msg}`);
-
-    if (msg.includes('not found')) {
-      console.log("\n💡 Agent not found. Try:");
-      console.log("   - agent-deploy search <keyword>");
-      console.log("   - agent-deploy list");
-    }
-
-    process.exit(1);
+    handleCommandError(error as Error, 'info');
   }
 }
 

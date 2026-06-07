@@ -11,6 +11,7 @@ import fs from "fs";
 import path from "path";
 import FormData from "form-data";
 import { AgentJsonV2 } from "./types.js";
+import { ErrorHandlers } from "./errors.js";
 
 // ============================================================
 // 类型定义
@@ -107,13 +108,17 @@ export class MarketClient {
 
     // 验证 agent.json 存在
     if (!fs.existsSync(agentJsonPath)) {
-      throw new Error(`agent.json not found in ${agentDir}`);
+      throw ErrorHandlers.missingAgentJson(agentDir);
     }
 
     // 读取 agent.json
-    const agentJson: AgentJsonV2 = JSON.parse(
-      fs.readFileSync(agentJsonPath, "utf-8")
-    );
+    let agentJson: AgentJsonV2;
+    try {
+      agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      throw ErrorHandlers.invalidAgentJson(agentJsonPath, msg);
+    }
 
     const agentName = agentJson.identity.name;
     const version = agentJson.identity.version;
@@ -146,8 +151,14 @@ export class MarketClient {
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || `Upload failed: ${response.statusText}`);
+        if (response.status === 401 || response.status === 403) {
+          throw ErrorHandlers.authenticationError();
+        } else if (response.status === 409) {
+          throw ErrorHandlers.conflictError(agentName, version);
+        } else {
+          const error = await response.json().catch(() => ({ detail: response.statusText }));
+          throw new Error(error.detail || `Upload failed: ${response.statusText}`);
+        }
       }
 
       const result = await response.json();
@@ -178,6 +189,9 @@ export class MarketClient {
     const response = await fetch(url);
 
     if (!response.ok) {
+      if (response.status === 404) {
+        throw ErrorHandlers.notFoundError('Agent', options.agentId);
+      }
       throw new Error(`Download failed: ${response.statusText}`);
     }
 
@@ -225,7 +239,10 @@ export class MarketClient {
     const response = await fetch(url);
 
     if (!response.ok) {
-      throw new Error(`Agent not found: ${agentId}`);
+      if (response.status === 404) {
+        throw ErrorHandlers.notFoundError('Agent', agentId);
+      }
+      throw new Error(`Failed to get agent: ${response.statusText}`);
     }
 
     return await response.json();
@@ -243,13 +260,22 @@ export class MarketClient {
     if (options.offset) params.append('offset', options.offset.toString());
 
     const url = `${this.baseUrl}/api/v1/agents?${params.toString()}`;
-    const response = await fetch(url);
 
-    if (!response.ok) {
-      throw new Error(`Search failed: ${response.statusText}`);
+    try {
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        throw new Error(`Search failed: ${response.statusText}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes('fetch') || msg.includes('ECONNREFUSED')) {
+        throw ErrorHandlers.marketConnectionError(this.baseUrl);
+      }
+      throw error;
     }
-
-    return await response.json();
   }
 
   /**
