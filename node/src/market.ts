@@ -65,6 +65,26 @@ export interface AgentInfo {
   updated_at: string;
 }
 
+export interface SearchOptions {
+  query?: string;
+  tag?: string;
+  category?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface SearchResult {
+  agents: AgentInfo[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ListLocalOptions {
+  type?: 'imported' | 'downloaded' | 'all';
+  outputDir?: string;
+}
+
 // ============================================================
 // Market Client
 // ============================================================
@@ -214,36 +234,29 @@ export class MarketClient {
   /**
    * 搜索 Agent
    */
-  async searchAgents(query: string): Promise<AgentInfo[]> {
-    const url = `${this.baseUrl}/api/v1/agents?q=${encodeURIComponent(query)}`;
+  async searchAgents(options: SearchOptions = {}): Promise<SearchResult> {
+    const params = new URLSearchParams();
+    if (options.query) params.append('q', options.query);
+    if (options.tag) params.append('tag', options.tag);
+    if (options.category) params.append('category', options.category);
+    if (options.limit) params.append('limit', options.limit.toString());
+    if (options.offset) params.append('offset', options.offset.toString());
+
+    const url = `${this.baseUrl}/api/v1/agents?${params.toString()}`;
     const response = await fetch(url);
 
     if (!response.ok) {
       throw new Error(`Search failed: ${response.statusText}`);
     }
 
-    const result = await response.json();
-    return result.agents || [];
+    return await response.json();
   }
 
   /**
    * 列出所有 Agent
    */
-  async listAgents(options?: { category?: string; limit?: number; offset?: number }): Promise<AgentInfo[]> {
-    const params = new URLSearchParams();
-    if (options?.category) params.append("category", options.category);
-    if (options?.limit) params.append("limit", options.limit.toString());
-    if (options?.offset) params.append("offset", options.offset.toString());
-
-    const url = `${this.baseUrl}/api/v1/agents?${params.toString()}`;
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      throw new Error(`List agents failed: ${response.statusText}`);
-    }
-
-    const result = await response.json();
-    return result.agents || [];
+  async listAgents(limit: number = 50, offset: number = 0): Promise<SearchResult> {
+    return this.searchAgents({ limit, offset });
   }
 
   // ============================================================
@@ -286,6 +299,69 @@ export class MarketClient {
       strip: 1, // 移除顶层目录
     });
   }
+}
+
+// ============================================================
+// 本地 Agent 管理
+// ============================================================
+
+/**
+ * 列出本地的 Agent
+ */
+export async function listLocalAgents(options: ListLocalOptions = {}): Promise<AgentInfo[]> {
+  const agents: AgentInfo[] = [];
+  const dirs: string[] = [];
+
+  // 确定要扫描的目录
+  if (options.type === 'imported' || options.type === 'all' || !options.type) {
+    dirs.push(path.resolve(options.outputDir || './', 'imported-agents'));
+  }
+  if (options.type === 'downloaded' || options.type === 'all' || !options.type) {
+    dirs.push(path.resolve(options.outputDir || './', 'downloaded-agents'));
+  }
+
+  // 扫描每个目录
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const agentDir = path.join(dir, entry.name);
+      const agentJsonPath = path.join(agentDir, 'agent.json');
+
+      if (!fs.existsSync(agentJsonPath)) continue;
+
+      try {
+        const agentJson: AgentJsonV2 = JSON.parse(
+          fs.readFileSync(agentJsonPath, 'utf-8')
+        );
+
+        const stats = fs.statSync(agentJsonPath);
+
+        agents.push({
+          id: agentJson.identity.name,
+          name: agentJson.identity.name,
+          display_name: agentJson.identity.display_name || agentJson.identity.name,
+          version: agentJson.identity.version,
+          description: agentJson.identity.description || '',
+          author: agentJson.identity.author || 'Unknown',
+          category: (agentJson.identity as any).category || 'general',
+          tags: agentJson.identity.tags || [],
+          downloads: 0,
+          rating: 0,
+          created_at: stats.birthtime.toISOString(),
+          updated_at: stats.mtime.toISOString(),
+        });
+      } catch (err) {
+        // Skip invalid agent.json files
+        continue;
+      }
+    }
+  }
+
+  return agents;
 }
 
 // ============================================================
