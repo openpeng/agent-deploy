@@ -64,13 +64,13 @@ def install_aider(adapted_content: str, agent_name: str, target_path: Path,
         if append and target_path.exists():
             if backup:
                 shutil.copy2(target_path, str(target_path) + ".bak")
-            with open(target_path, "a") as f:
+            with open(target_path, "a", encoding="utf-8") as f:
                 f.write("\n\n" + adapted_content)
         else:
             if backup and target_path.exists():
                 shutil.copy2(target_path, str(target_path) + ".bak")
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(target_path, "w") as f:
+            with open(target_path, "w", encoding="utf-8") as f:
                 f.write(adapted_content)
     except Exception as e:
         result["status"] = "error"
@@ -95,7 +95,7 @@ def install_agents_md(adapted_content: str, agent_name: str, target_path: Path,
         if target_path.exists():
             if backup:
                 shutil.copy2(target_path, str(target_path) + ".bak")
-            existing = target_path.read_text()
+            existing = target_path.read_text(encoding="utf-8")
             # Replace existing section if present
             import re
             pattern = re.compile(
@@ -104,11 +104,11 @@ def install_agents_md(adapted_content: str, agent_name: str, target_path: Path,
             )
             existing = pattern.sub("", existing)
             existing = existing.rstrip() + full_content
-            with open(target_path, "w") as f:
+            with open(target_path, "w", encoding="utf-8") as f:
                 f.write(existing)
         else:
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(target_path, "w") as f:
+            with open(target_path, "w", encoding="utf-8") as f:
                 f.write(full_content.lstrip())
     except Exception as e:
         result["status"] = "error"
@@ -127,7 +127,7 @@ def install_generic(adapted_content: str, agent_name: str, target_path: Path,
         if backup and target_path.exists():
             shutil.copy2(target_path, str(target_path) + ".bak")
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(target_path, "w") as f:
+        with open(target_path, "w", encoding="utf-8") as f:
             f.write(adapted_content)
     except Exception as e:
         result["status"] = "error"
@@ -216,17 +216,17 @@ def main():
         if adapted_path.is_dir():
             skill_md = adapted_path / "SKILL.md"
             if skill_md.exists():
-                adapted_content = skill_md.read_text()
+                adapted_content = skill_md.read_text(encoding="utf-8")
             else:
                 # Try agent.md or first .md file
                 md_files = list(adapted_path.glob("*.md"))
                 if md_files:
-                    adapted_content = md_files[0].read_text()
+                    adapted_content = md_files[0].read_text(encoding="utf-8")
                 else:
                     print(f"Error: No markdown file found in {adapted_path}", file=sys.stderr)
                     sys.exit(1)
         elif adapted_path.is_file():
-            adapted_content = adapted_path.read_text()
+            adapted_content = adapted_path.read_text(encoding="utf-8")
         else:
             print(f"Error: Path not found: {adapted_path}", file=sys.stderr)
             sys.exit(1)

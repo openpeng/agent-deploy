@@ -9,6 +9,12 @@ import {
 import { detectAll, detectPrimary } from "./detect.js";
 import { adaptAgent } from "./adapt.js";
 import { installAgent } from "./install.js";
+import { ImportManager } from "./import-manager.js";
+import { CursorImportAdapter } from "./adapters/cursor-import.js";
+import { ClaudeImportAdapter } from "./adapters/claude-import.js";
+import { CodeBuddyImportAdapter } from "./adapters/codebuddy-import.js";
+import { GitHubImportAdapter } from "./adapters/github-import.js";
+import { uploadAgent, downloadAgent } from "./market.js";
 
 const SERVER_NAME = "agent-deploy";
 const SERVER_VERSION = "1.0.0";
@@ -57,6 +63,47 @@ const TOOLS: Tool[] = [
         level: { type: "string", description: "Install level", default: "both" },
       },
       required: ["agent_path"],
+    },
+  },
+  {
+    name: "import_agent",
+    description: "Import an agent from an AI tool format (Cursor, Claude Code, CodeBuddy, GitHub) to agent.json v2.0 format.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source_path: { type: "string", description: "Path to the agent file or directory (e.g., .cursor/commands/my-agent.md)" },
+        output_dir: { type: "string", description: "Output directory for agent.json (default: ./imported-agents)" },
+        tool: { type: "string", description: "Force specific tool adapter: cursor, claude_code, codebuddy, github_copilot (auto-detect if omitted)" },
+        dry_run: { type: "boolean", description: "Preview import without writing files (default: false)" },
+      },
+      required: ["source_path"],
+    },
+  },
+  {
+    name: "upload_agent",
+    description: "Upload an agent to the Market for sharing and distribution. Requires a valid API key.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agent_dir: { type: "string", description: "Path to the agent directory containing agent.json" },
+        market_url: { type: "string", description: "Market API URL (default: $MARKET_API_URL or http://localhost:8321)" },
+        api_key: { type: "string", description: "API key for authentication (default: $MARKET_API_KEY)" },
+        force: { type: "boolean", description: "Force overwrite existing version (default: false)" },
+      },
+      required: ["agent_dir"],
+    },
+  },
+  {
+    name: "download_agent",
+    description: "Download an agent from the Market by ID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agent_id: { type: "string", description: "Agent ID to download from Market" },
+        output_dir: { type: "string", description: "Output directory (default: ./downloaded-agents)" },
+        market_url: { type: "string", description: "Market API URL (default: $MARKET_API_URL or http://localhost:8321)" },
+      },
+      required: ["agent_id"],
     },
   },
 ];
@@ -119,6 +166,122 @@ async function handleDeployAgent(args: Record<string, unknown>): Promise<string>
   }, null, 2);
 }
 
+async function handleImportAgent(args: Record<string, unknown>): Promise<string> {
+  const sourcePath = args.source_path as string;
+  const outputDir = (args.output_dir as string) ?? "./imported-agents";
+  const tool = args.tool as string | undefined;
+  const dryRun = (args.dry_run as boolean) ?? false;
+
+  if (!sourcePath) {
+    throw new Error("source_path is required");
+  }
+
+  // Create ImportManager and register all adapters
+  const manager = new ImportManager();
+  manager.registerAdapter(new CursorImportAdapter());
+  manager.registerAdapter(new ClaudeImportAdapter());
+  manager.registerAdapter(new CodeBuddyImportAdapter());
+  manager.registerAdapter(new GitHubImportAdapter());
+
+  try {
+    if (dryRun) {
+      // Dry-run: preview without writing
+      const descriptor = manager.dryRun(sourcePath, tool);
+
+      return JSON.stringify({
+        status: "dry-run",
+        source_path: sourcePath,
+        detected_tool: tool || "auto",
+        agent: {
+          name: descriptor.identity.name,
+          version: descriptor.identity.version,
+          display_name: descriptor.identity.display_name,
+          description: descriptor.identity.description,
+          author: descriptor.identity.author,
+          tags: descriptor.identity.tags,
+        },
+        output_path: `${outputDir}/${descriptor.identity.name}/agent.json`,
+        message: "Dry-run successful. Use dry_run: false to write files."
+      }, null, 2);
+    } else {
+      // Real import: write agent.json
+      const agentDir = manager.importAgent(sourcePath, outputDir, tool);
+      const agentJsonPath = `${agentDir}/agent.json`;
+
+      return JSON.stringify({
+        status: "success",
+        source_path: sourcePath,
+        output_path: agentJsonPath,
+        agent_dir: agentDir,
+        message: `✅ Successfully imported agent to: ${agentDir}\n\nYou can now:\n1. Upload this agent to the market\n2. Deploy it to other AI tools with deploy_agent`
+      }, null, 2);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Import failed: ${msg}`);
+  }
+}
+
+async function handleUploadAgent(args: Record<string, unknown>): Promise<string> {
+  const agentDir = args.agent_dir as string;
+  const marketUrl = args.market_url as string | undefined;
+  const apiKey = args.api_key as string | undefined;
+  const force = args.force as boolean | undefined;
+
+  if (!agentDir) {
+    throw new Error("agent_dir is required");
+  }
+
+  try {
+    const result = await uploadAgent({
+      agentDir,
+      marketUrl,
+      apiKey,
+      force,
+    });
+
+    return JSON.stringify({
+      status: "success",
+      agent_id: result.agent_id,
+      agent_name: result.agent_name,
+      version: result.version,
+      market_url: result.market_url,
+      message: `✅ Successfully uploaded ${result.agent_name} v${result.version}\n\nMarket URL: ${result.market_url}\n\nYou can now:\n1. Share the Market URL with others\n2. Deploy this agent to AI tools with deploy_agent`,
+    }, null, 2);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Upload failed: ${msg}`);
+  }
+}
+
+async function handleDownloadAgent(args: Record<string, unknown>): Promise<string> {
+  const agentId = args.agent_id as string;
+  const outputDir = args.output_dir as string | undefined || "./downloaded-agents";
+  const marketUrl = args.market_url as string | undefined;
+
+  if (!agentId) {
+    throw new Error("agent_id is required");
+  }
+
+  try {
+    const result = await downloadAgent({
+      agentId,
+      outputDir,
+      marketUrl,
+    });
+
+    return JSON.stringify({
+      status: "success",
+      agent_id: result.agent_id,
+      output_path: result.output_path,
+      message: `✅ Successfully downloaded agent to: ${result.output_path}\n\nYou can now:\n1. Review the agent.json\n2. Deploy it to AI tools with deploy_agent`,
+    }, null, 2);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Download failed: ${msg}`);
+  }
+}
+
 // ---- Server Setup ----
 const server = new Server(
   { name: SERVER_NAME, version: SERVER_VERSION },
@@ -136,6 +299,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "adapt_agent": result = await handleAdaptAgent(args ?? {}); break;
       case "install_agent": result = await handleInstallAgent(args ?? {}); break;
       case "deploy_agent": result = await handleDeployAgent(args ?? {}); break;
+      case "import_agent": result = await handleImportAgent(args ?? {}); break;
+      case "upload_agent": result = await handleUploadAgent(args ?? {}); break;
+      case "download_agent": result = await handleDownloadAgent(args ?? {}); break;
       default: throw new Error(`Unknown tool: ${name}`);
     }
     return { content: [{ type: "text", text: result }] };

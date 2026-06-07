@@ -74,8 +74,9 @@ describe("adapt", () => {
   });
 
   it("returns error for unknown tool", async () => {
-    const result = await adaptAgent(agentDir, "nonexistent");
-    expect(result.error).toBeTruthy();
+    const result = adaptAgent(agentDir, "nonexistent");
+    expect(result.content).toContain("Unknown target tool");
+    expect(result.target_file).toContain("unknown");
   });
 });
 

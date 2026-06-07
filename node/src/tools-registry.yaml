@@ -33,6 +33,39 @@ tools:
       command: null
       notes: "CodeBuddy auto-discovers SKILL.md files in .codebuddy/skills/ on launch"
 
+  codebuddy_agent:
+    name: "CodeBuddy Agent"
+    display_name: "CodeBuddy (Agent Format)"
+    type: cli
+    cli_binary: "codebuddy"
+    install_method: "npm install -g @tencent-ai/codebuddy"
+    detection:
+      env_vars: []
+      config_files:
+        - ".codebuddy/"
+        - ".codebuddy/agents/"
+      binaries:
+        - "codebuddy"
+      process_names:
+        - "codebuddy"
+    agent_format:
+      type: "markdown_file"
+      directory: ".codebuddy/agents/"
+      main_file: "{agent_name}.md"
+      yaml_fields:
+        name: "filename_without_ext"
+        description: "first_line_or_h1"
+        instruction: "body_markdown"
+      notes: "Plain markdown file format for CodeBuddy agents."
+    install:
+      project_level: ".codebuddy/agents/{agent_name}.md"
+      user_level: "~/.codebuddy/agents/{agent_name}.md"
+      registration: "auto-discovered on next codebuddy launch"
+    configuration:
+      method: "auto_discover"
+      command: null
+      notes: "CodeBuddy auto-discovers agent files in .codebuddy/agents/ on launch"
+
   claude_code:
     name: "Claude Code"
     display_name: "Anthropic Claude Code"

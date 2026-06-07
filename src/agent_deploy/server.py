@@ -177,7 +177,7 @@ SCHEMA_DEPLOY_AGENT: Dict[str, Any] = {
         "target_tool": {
             "type": "string",
             "enum": ["auto", "all"] + [
-                "codebuddy", "claude_code", "cursor", "github_copilot",
+                "codebuddy", "codebuddy_agent", "claude_code", "cursor", "github_copilot",
                 "opencode", "windsurf", "trae", "aider", "agents_md",
             ],
             "default": "auto",

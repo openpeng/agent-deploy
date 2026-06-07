@@ -12,6 +12,8 @@ export interface InstallEntry {
   level: string;
   /** "installed", "dry-run", or "error: <msg>". */
   status: string;
+  /** Error message if status is "error". */
+  error?: string;
 }
 
 /**
