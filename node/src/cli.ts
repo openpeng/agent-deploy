@@ -6,6 +6,7 @@
 
 import { parseArgs } from "node:util";
 import { existsSync } from "fs";
+import fs from "fs";
 import { resolve } from "path";
 import { ImportManager } from "./import-manager.js";
 import { CursorImportAdapter } from "./adapters/cursor-import.js";
@@ -17,6 +18,7 @@ import { adaptAgent } from "./adapt.js";
 import { installAgent } from "./install.js";
 import { detectAll } from "./detect.js";
 import { ErrorHandlers, handleCommandError, UserFriendlyError } from "./errors.js";
+import { listTemplates, getTemplate, initFromTemplate } from "./templates.js";
 
 const VERSION = "1.0.0";
 
@@ -34,6 +36,8 @@ Usage:
   agent-deploy list [options]
   agent-deploy search <query> [options]
   agent-deploy info <agent-id> [options]
+  agent-deploy init <template> [options]
+  agent-deploy templates
   agent-deploy --help
   agent-deploy --version
 
@@ -44,6 +48,8 @@ Commands:
   list                  List local agents
   search <query>        Search agents in Market
   info <agent-id>       Show detailed agent information
+  init <template>       Create new agent from template
+  templates             List available agent templates
 
 Import Options:
   -o, --output <dir>    Output directory (default: ./imported-agents)
@@ -81,6 +87,11 @@ Info Options:
   -m, --market <url>    Market API URL (for Market info)
   -h, --help            Show this help message
 
+Init Options:
+  -n, --name <name>     Agent name (default: use template name)
+  -o, --output <dir>    Output directory (default: ./agents)
+  -h, --help            Show this help message
+
 Examples:
   # Import from AI tool
   agent-deploy import .cursor/commands/my-agent.md
@@ -102,6 +113,10 @@ Examples:
   # Show agent info
   agent-deploy info my-agent
   agent-deploy info my-agent --local
+
+  # Create from template
+  agent-deploy init agent-builder -n my-builder
+  agent-deploy templates
 
 Supported Platforms:
   - Cursor           (.cursor/commands/*.md)
@@ -353,7 +368,7 @@ async function handleDeployCommand(args: string[]) {
     }
 
     // Read agent name
-    const agentJson = JSON.parse(require("fs").readFileSync(agentJsonPath, "utf-8"));
+    const agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
     const agentName = agentJson.identity?.name || agentJson.name || "agent";
 
     // Deploy to each tool
@@ -692,6 +707,140 @@ Examples:
 }
 
 /**
+ * Handle init command
+ */
+async function handleInitCommand(args: string[]) {
+  try {
+    // Parse arguments
+    const { values, positionals } = parseArgs({
+      args,
+      options: {
+        name: { type: "string", short: "n" },
+        output: { type: "string", short: "o" },
+        help: { type: "boolean", short: "h" },
+      },
+      allowPositionals: true,
+    });
+
+    if (values.help) {
+      console.log(`
+Usage: agent-deploy init <template> [options]
+
+Create a new agent from a template.
+
+Arguments:
+  <template>            Template ID (use 'agent-deploy templates' to list)
+
+Options:
+  -n, --name <name>     Agent name (default: use template name)
+  -o, --output <dir>    Output directory (default: ./agents)
+  -h, --help            Show this help message
+
+Examples:
+  agent-deploy init agent-builder
+  agent-deploy init code-reviewer -n my-reviewer
+  agent-deploy init test-writer -o ./my-agents
+      `);
+      return;
+    }
+
+    const template = positionals[0];
+    if (!template) {
+      console.error("❌ Error: Template ID is required\n");
+      console.log("Usage: agent-deploy init <template> [options]");
+      console.log("Try: agent-deploy templates");
+      process.exit(1);
+    }
+
+    console.log(`🎨 Creating agent from template: ${template}...\n`);
+
+    const agentDir = initFromTemplate({
+      template,
+      name: values.name as string,
+      outputDir: values.output as string || './agents',
+    });
+
+    console.log("✅ Successfully created agent!\n");
+    console.log(`Location: ${agentDir}`);
+    console.log("\nNext steps:");
+    console.log("  1. Review and customize agent.json");
+    console.log("  2. Test the agent instructions");
+    console.log(`  3. Upload to Market: agent-deploy upload ${agentDir}`);
+    console.log(`  4. Deploy locally: agent-deploy deploy ${agentDir} -t claude_code`);
+  } catch (error) {
+    handleCommandError(error as Error, 'init');
+  }
+}
+
+/**
+ * Handle templates command
+ */
+async function handleTemplatesCommand(args: string[]) {
+  try {
+    // Parse arguments
+    const { values } = parseArgs({
+      args,
+      options: {
+        help: { type: "boolean", short: "h" },
+      },
+      allowPositionals: true,
+    });
+
+    if (values.help) {
+      console.log(`
+Usage: agent-deploy templates
+
+List all available agent templates.
+
+Templates provide quick-start agents for common use cases.
+
+Examples:
+  agent-deploy templates
+  agent-deploy init agent-builder
+      `);
+      return;
+    }
+
+    console.log("📚 Available Agent Templates:\n");
+
+    const templates = listTemplates();
+
+    if (templates.length === 0) {
+      console.log("No templates found.");
+      return;
+    }
+
+    // Group by category
+    const byCategory: Record<string, typeof templates> = {};
+    for (const template of templates) {
+      if (!byCategory[template.category]) {
+        byCategory[template.category] = [];
+      }
+      byCategory[template.category].push(template);
+    }
+
+    // Display by category
+    for (const [category, categoryTemplates] of Object.entries(byCategory)) {
+      console.log(`\n${category.toUpperCase()}`);
+      console.log("=".repeat(50));
+
+      for (const template of categoryTemplates) {
+        console.log(`\n${template.name} (${template.id})`);
+        console.log(`  ${template.description}`);
+        console.log(`  Tags: ${template.tags.join(', ')}`);
+        console.log(`  Author: ${template.author}`);
+      }
+    }
+
+    console.log(`\n\nTotal: ${templates.length} template(s)`);
+    console.log("\n💡 Use a template:");
+    console.log("   agent-deploy init <template-id> [-n <your-agent-name>]");
+  } catch (error) {
+    handleCommandError(error as Error, 'templates');
+  }
+}
+
+/**
  * Main entry point
  */
 async function main() {
@@ -730,9 +879,13 @@ async function main() {
     await handleSearchCommand(args.slice(1));
   } else if (command === "info") {
     await handleInfoCommand(args.slice(1));
+  } else if (command === "init") {
+    await handleInitCommand(args.slice(1));
+  } else if (command === "templates") {
+    await handleTemplatesCommand(args.slice(1));
   } else {
     console.error(`❌ Unknown command: ${command}\n`);
-    console.error("Available commands: import, upload, deploy, list, search, info");
+    console.error("Available commands: import, upload, deploy, list, search, info, init, templates");
     console.error("Run 'agent-deploy --help' for more information");
     process.exit(1);
   }
