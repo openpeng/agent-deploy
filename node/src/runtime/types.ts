@@ -26,13 +26,22 @@ export interface PipelineStep {
   output?: string;
   when?: string;
   on_fail?: OnFailStrategy;
+  timeout_ms?: number;  // Per-step timeout in milliseconds
+}
+
+export interface RetryConfig {
+  max_attempts: number;
+  backoff?: "fixed" | "exponential";
+  initial_delay_ms?: number;
+  max_delay_ms?: number;
 }
 
 export type OnFailStrategy =
   | "abort"
   | "skip"
   | "continue"
-  | { retry: number };
+  | { retry: number }
+  | { retry: RetryConfig };
 
 export interface ExecutionContext {
   agent: any; // Will be defined later

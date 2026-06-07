@@ -34,6 +34,7 @@ import { WebFetchTool } from "./runtime/tools/web-fetch.js";
 import { WebSearchTool } from "./runtime/tools/web-search.js";
 import { invokeAgentTool } from "./runtime/builtin-tools/invoke-agent.js";
 import { V2CompatibilityLayer } from "./runtime/v2-compat.js";
+import { getPolicyRegistry } from "./runtime/policy.js";
 import { MCPToolLoader } from "./runtime/mcp-integration.js";
 import { SkillLoader } from "./runtime/skill-integration.js";
 import { registerMemoryTool } from "./runtime/memory-integration.js";
@@ -98,6 +99,7 @@ Run Options:
   --cwd <dir>           Working directory for agent execution (default: agent directory)
   --env <json>          Environment variables (JSON object)
   -v, --verbose         Verbose output (show step details)
+  --trusted            Grant full trust to agent (allows bash, network, filesystem access)
   -h, --help            Show this help message
 
 Use Options:
@@ -831,6 +833,7 @@ async function handleRunCommand(args: string[]) {
         cwd: { type: "string" },
         env: { type: "string", multiple: true },
         verbose: { type: "boolean", short: "v", default: false },
+        trusted: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
       allowPositionals: true,
@@ -935,8 +938,8 @@ Examples:
       }
     }
 
-    // Parse environment variables: supports --env '{"KEY":"val"}' or --env KEY=value
-    let envVars: Record<string, string> = {};
+    // Parse environment variables: start with process.env, then override with --env
+    let envVars: Record<string, string> = { ...process.env as Record<string, string> };
     if (values.env) {
       const envList = values.env as string[];
       if (envList.length === 1 && envList[0].trimStart().startsWith("{")) {
@@ -994,9 +997,22 @@ Examples:
     // Register memory tool bound to agent directory
     registerMemoryTool(resolvedAgentDir, registry);
 
+    // Security: apply execution policy
+    const policyRegistry = getPolicyRegistry();
+    if (values.trusted) {
+      policyRegistry.trust(agentName);
+      if (values.verbose) {
+        console.log(`[SECURITY] Agent '${agentName}' is running in TRUSTED mode (full access granted)`);
+      }
+    } else {
+      if (values.verbose) {
+        console.log(`[SECURITY] Agent '${agentName}' is running in RESTRICTED mode (no bash, no network, cwd-only fs)`);
+      }
+    }
+
     // Create execution context, seeding sharedContext from worker.yaml
     const context = ExecutionContextManager.create({
-      agent: { name: agentName },
+      agent: { name: agentName, identity: { name: agentName } },
       initialArgs,
       cwd: workingDir,
       env: envVars,
@@ -1152,6 +1168,17 @@ Examples:
     // Read agent metadata
     const agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
     const agentName = agentJson.identity?.name || agentJson.name || path.basename(agentPath);
+    const agentAuthor = agentJson.identity?.author || "Unknown";
+    const agentVersion = agentJson.identity?.version || "0.0.0";
+    const agentSource = agentJson.identity?.repository || "Market";
+
+    // Security: show agent source info
+    console.log(`\n🔒 Security Notice:`);
+    console.log(`   Agent: ${agentName} v${agentVersion}`);
+    console.log(`   Author: ${agentAuthor}`);
+    console.log(`   Source: ${agentSource}`);
+    console.log(`   This agent will run in RESTRICTED mode by default.`);
+    console.log(`   Use 'agent-deploy run --trusted' if you trust this publisher.\n`);
 
     // Auto-detect installed tools, always include codebuddy_agent
     const detected = detectAll();

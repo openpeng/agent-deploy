@@ -11,7 +11,78 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { spawn, ChildProcess } from "child_process";
 import { ExecutionContext } from "./types.js";
+
+// ---------------------------------------------------------------------------
+// Stdio MCP Transport
+// ---------------------------------------------------------------------------
+
+class StdioTransport {
+  private process: ChildProcess | null = null;
+  private requestId = 1;
+  private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+  private buffer = "";
+
+  constructor(private command: string, private args: string[] = [], private env?: Record<string, string>) {}
+
+  async start(): Promise<void> {
+    this.process = spawn(this.command, this.args, {
+      env: { ...process.env, ...this.env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    this.process.stdout!.on("data", (chunk: Buffer) => {
+      this.buffer += chunk.toString();
+      this.processBuffer();
+    });
+
+    this.process.stderr!.on("data", (chunk: Buffer) => {
+      console.warn(`[MCP STDIO stderr] ${chunk.toString().trim()}`);
+    });
+  }
+
+  private processBuffer(): void {
+    const lines = this.buffer.split("\n");
+    this.buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const msg = JSON.parse(line);
+        if (msg.id && this.pending.has(msg.id)) {
+          const handler = this.pending.get(msg.id)!;
+          this.pending.delete(msg.id);
+          if (msg.error) {
+            handler.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+          } else {
+            handler.resolve(msg.result);
+          }
+        }
+      } catch {
+        // Ignore non-JSON lines
+      }
+    }
+  }
+
+  async request(method: string, params: any): Promise<any> {
+    if (!this.process) throw new Error("Stdio transport not started");
+
+    const id = this.requestId++;
+    const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+
+    return new Promise<any>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.process!.stdin!.write(body + "\n");
+    });
+  }
+
+  async stop(): Promise<void> {
+    if (this.process) {
+      this.process.kill();
+      this.process = null;
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Config types
@@ -74,6 +145,7 @@ async function httpMCPRequest(
 
 export class MCPToolWrapper {
   readonly name: string;
+  private transport: StdioTransport | null = null;
 
   constructor(
     private toolDef: MCPToolDefinition,
@@ -93,9 +165,32 @@ export class MCPToolWrapper {
         this.serverEntry.headers || {}
       );
     }
+
+    if (this.serverEntry.type === "stdio") {
+      if (!this.transport) {
+        this.transport = new StdioTransport(
+          this.serverEntry.command,
+          this.serverEntry.args || [],
+          this.serverEntry.env
+        );
+        await this.transport.start();
+      }
+      return await this.transport.request("tools/call", {
+        name: this.toolDef.name,
+        arguments: args,
+      });
+    }
+
     throw new Error(
       `MCP server type '${(this.serverEntry as any).type}' not yet supported for tool execution`
     );
+  }
+
+  async dispose(): Promise<void> {
+    if (this.transport) {
+      await this.transport.stop();
+      this.transport = null;
+    }
   }
 }
 
@@ -104,6 +199,49 @@ export class MCPToolWrapper {
 // ---------------------------------------------------------------------------
 
 export class MCPToolLoader {
+  /**
+   * Discover tools from a stdio MCP server by spawning a short-lived process.
+   */
+  async listToolsFromStdio(
+    serverName: string,
+    entry: MCPStdioServerConfig
+  ): Promise<MCPToolDefinition[]> {
+    const transport = new StdioTransport(entry.command, entry.args || [], entry.env);
+    try {
+      await transport.start();
+      const result = await transport.request("tools/list", {});
+      await transport.stop();
+      return (result?.tools || []) as MCPToolDefinition[];
+    } catch (e) {
+      console.warn(
+        `[WARN] Could not list tools from MCP server '${serverName}' (${entry.command}): ${(e as Error).message}`
+      );
+      try { await transport.stop(); } catch { /* ignore */ }
+      return [];
+    }
+  }
+
+  /**
+   * Auto-install MCP server package via npx if package is specified.
+   */
+  async autoInstall(serverName: string, _entry: MCPStdioServerConfig, packageName: string): Promise<void> {
+    console.log(`[MCP] Installing ${packageName} for server '${serverName}'...`);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn("npx", ["-y", packageName], {
+          stdio: "inherit",
+        });
+        proc.on("close", (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`npx install exited with code ${code}`));
+        });
+        proc.on("error", reject);
+      });
+      console.log(`[MCP] Successfully installed ${packageName}`);
+    } catch (e) {
+      console.warn(`[WARN] Failed to install ${packageName}: ${(e as Error).message}`);
+    }
+  }
   /**
    * Load MCP config from agent's mcp/ directory.
    * Looks for mcp/config.json (Claude Desktop format: { mcpServers: {...} })
@@ -164,6 +302,11 @@ export class MCPToolLoader {
     for (const [serverName, entry] of Object.entries(config.mcpServers)) {
       if (entry.type === "http") {
         const toolDefs = await this.listToolsFromHTTP(serverName, entry);
+        for (const def of toolDefs) {
+          wrappers.push(new MCPToolWrapper(def, serverName, entry));
+        }
+      } else if (entry.type === "stdio") {
+        const toolDefs = await this.listToolsFromStdio(serverName, entry);
         for (const def of toolDefs) {
           wrappers.push(new MCPToolWrapper(def, serverName, entry));
         }

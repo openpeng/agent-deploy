@@ -14,6 +14,7 @@ import { V2CompatibilityLayer } from "../v2-compat.js";
 import { ToolRegistry } from "../tool-registry.js";
 import { AgentCache } from "../agent-cache.js";
 import { MarketAgentLoader, FileSystemAgentLoader, AgentResolver } from "../agent-loader.js";
+import { getPolicyRegistry } from "../policy.js";
 
 interface InvokeAgentArgs {
   agent: string;        // Agent 路径 / market:// URL / 简单名称
@@ -91,6 +92,10 @@ export const invokeAgentTool = {
 
     console.log(`  ↳ Invoking sub-agent: ${agentName}`);
 
+    // Propagate trust from parent to child agent
+    const parentAgentName = context.agent?.identity?.name || context.agent?.name || "unknown";
+    getPolicyRegistry().propagateTrust(parentAgentName, agentName);
+
     // 4. 加载 worker.yaml（支持 v2 兼容）
     const v2Compat = new V2CompatibilityLayer();
     const workerYaml = v2Compat.getWorkerYaml(agentDir);
@@ -102,12 +107,14 @@ export const invokeAgentTool = {
       throw new Error(`Invalid worker.yaml in ${agentName}: ${validation.errors.join(", ")}`);
     }
 
-    // 6. 创建子 agent 执行上下文
+    // 6. 创建子 agent 执行上下文（继承父 agent 的环境变量和策略）
     const subCwd = cwd || agentDir;
+    const parentEnv = ExecutionContextManager.getAllEnv(context) || {};
     const subContext = ExecutionContextManager.create({
-      agent: { name: agentName },
+      agent: { name: agentName, identity: { name: agentName } },
       initialArgs: input,
       cwd: subCwd,
+      env: { ...parentEnv, ...((input as any)?.__env || {}) },
     });
 
     // 将 registry 附加到子 context，支持嵌套 invoke_agent

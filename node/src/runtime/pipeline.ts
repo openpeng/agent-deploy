@@ -4,6 +4,7 @@ import {
   ExecutionContext,
   StepResult,
   OnFailStrategy,
+  RetryConfig,
 } from "./types.js";
 import { ExecutionContextManager } from "./context.js";
 import { TemplateResolver } from "./template.js";
@@ -69,55 +70,66 @@ export class PipelineEngine {
   }
 
   /**
-   * Execute a pipeline
+   * Execute a pipeline with optional global timeout.
    */
   async execute(
     yaml: WorkerYaml,
-    context: ExecutionContext
+    context: ExecutionContext,
+    timeoutMs?: number
   ): Promise<any> {
-    this.logger.debug(`Starting pipeline execution with ${yaml.pipeline.length} steps`);
+    const effectiveTimeout = timeoutMs || 300000; // Default 5 min
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(new Error("Pipeline timeout")), effectiveTimeout);
 
-    // Initialize shared context from yaml
-    if (yaml.shared_context) {
-      for (const [key, value] of Object.entries(yaml.shared_context)) {
-        ExecutionContextManager.setShared(context, key, value);
-      }
-    }
+    try {
+      this.logger.debug(`Starting pipeline execution with ${yaml.pipeline.length} steps`);
 
-    // Execute each step
-    for (const step of yaml.pipeline) {
-      this.logger.debug(`Executing step: ${step.step}`);
-
-      // Check condition
-      if (step.when && !this.evaluateCondition(step.when, context)) {
-        this.logger.debug(`Step '${step.step}' skipped by condition: ${step.when}`);
-        continue;
-      }
-
-      // Resolve template variables in args
-      const resolvedArgs = this.templateResolver.resolve(step.args || {}, context);
-
-      // Execute step
-      const result = await this.executeStep(step, resolvedArgs, context);
-
-      // If step failed, handle the error
-      if (!result.success && result.error) {
-        const handled = await this.handleError(step, result.error, context);
-        if (!handled) {
-          throw result.error;
-        }
-      } else {
-        // Store result for successful steps
-        ExecutionContextManager.setStepResult(context, step.step, result);
-
-        // Store output in shared context if specified
-        if (step.output && result.success) {
-          ExecutionContextManager.setShared(context, step.output, result.output);
+      // Initialize shared context from yaml
+      if (yaml.shared_context) {
+        for (const [key, value] of Object.entries(yaml.shared_context)) {
+          ExecutionContextManager.setShared(context, key, value);
         }
       }
-    }
 
-    return this.getFinalResult(context);
+      // Execute each step
+      for (const step of yaml.pipeline) {
+        if (controller.signal.aborted) break;
+
+        this.logger.debug(`Executing step: ${step.step}`);
+
+        // Check condition
+        if (step.when && !this.evaluateCondition(step.when, context)) {
+          this.logger.debug(`Step '${step.step}' skipped by condition: ${step.when}`);
+          continue;
+        }
+
+        // Resolve template variables in args
+        const resolvedArgs = this.templateResolver.resolve(step.args || {}, context);
+
+        // Execute step (with step-level timeout if specified)
+        const result = await this.executeStep(step, resolvedArgs, context);
+
+        // If step failed, handle the error
+        if (!result.success && result.error) {
+          const handled = await this.handleError(step, result.error, context);
+          if (!handled) {
+            throw result.error;
+          }
+        } else if (result.success) {
+          // Store result for successful steps
+          ExecutionContextManager.setStepResult(context, step.step, result);
+
+          // Store output in shared context if specified
+          if (step.output) {
+            ExecutionContextManager.setShared(context, step.output, result.output);
+          }
+        }
+      }
+
+      return this.getFinalResult(context);
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   /**
@@ -130,13 +142,28 @@ export class PipelineEngine {
   ): Promise<StepResult> {
     const tool = this.toolRegistry.get(step.tool);
     if (!tool) {
-      throw new Error(`Tool not found: ${step.tool}`);
+      return {
+        output: null,
+        success: false,
+        error: new Error(`Tool not found: ${step.tool}`),
+        duration_ms: 0,
+      };
     }
 
     const startTime = Date.now();
     try {
       this.logger.debug(`Calling tool '${step.tool}' with args: ${JSON.stringify(args)}`);
-      const output = await tool.execute(args, context);
+
+      // Step-level timeout support
+      let executePromise = tool.execute(args, context);
+      if (step.timeout_ms) {
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error(`Step '${step.step}' timed out after ${step.timeout_ms}ms`)), step.timeout_ms);
+        });
+        executePromise = Promise.race([executePromise, timeoutPromise]);
+      }
+
+      const output = await executePromise;
       const duration = Date.now() - startTime;
 
       this.logger.debug(`Step '${step.step}' completed in ${duration}ms`);
@@ -165,26 +192,71 @@ export class PipelineEngine {
   private evaluateCondition(condition: string, context: ExecutionContext): boolean {
     try {
       // Replace template variables
-      const resolved = this.templateResolver.resolve(condition, context);
+      let resolved: any = this.templateResolver.resolve(condition, context);
 
-      // Simple evaluation: check if it's a truthy value
-      if (typeof resolved === "boolean") {
-        return resolved;
-      }
+      // Simple boolean/string evaluation
+      if (typeof resolved === "boolean") return resolved;
+      if (typeof resolved === "number") return resolved !== 0;
 
       if (typeof resolved === "string") {
-        // Handle common string patterns
-        if (resolved === "true") return true;
-        if (resolved === "false") return false;
-        if (resolved === "") return false;
-        return true; // Non-empty string is truthy
+        const expr = resolved.trim();
+
+        // Handle logical AND/OR
+        if (expr.includes(" && ") || expr.includes(" || ")) {
+          const parts = expr.includes(" || ") ? expr.split(" || ") : expr.split(" && ");
+          const isAnd = expr.includes(" && ");
+          const results = parts.map((p) => this.evaluateSimple(p.trim()));
+          return isAnd ? results.every(Boolean) : results.some(Boolean);
+        }
+
+        // Handle comparison operators (==, !=, >, <, >=, <=)
+        const cmpMatch = expr.match(/^(.+?)\s*(==|!=|>=|<=|>|<)\s*(.+)$/);
+        if (cmpMatch) {
+          const left = this.normalizeValue(cmpMatch[1].trim());
+          const op = cmpMatch[2];
+          const right = this.normalizeValue(cmpMatch[3].trim());
+          return this.compareValues(left, op, right);
+        }
+
+        return this.evaluateSimple(expr);
       }
 
-      // Other types
       return !!resolved;
     } catch (error) {
       this.logger.warn(`Failed to evaluate condition '${condition}': ${(error as Error).message}`);
       return false;
+    }
+  }
+
+  private evaluateSimple(val: string): boolean {
+    if (val === "true") return true;
+    if (val === "false") return false;
+    if (val === "") return false;
+    return true;
+  }
+
+  private normalizeValue(val: string): any {
+    // Strip quotes
+    if ((val.startsWith("'") && val.endsWith("'")) || (val.startsWith('"') && val.endsWith('"'))) {
+      return val.slice(1, -1);
+    }
+    if (val === "true") return true;
+    if (val === "false") return false;
+    if (val === "0") return 0;
+    const num = Number(val);
+    if (!isNaN(num) && val.trim() !== "") return num;
+    return val;
+  }
+
+  private compareValues(left: any, op: string, right: any): boolean {
+    switch (op) {
+      case "==": return left == right;
+      case "!=": return left != right;
+      case ">": return left > right;
+      case "<": return left < right;
+      case ">=": return left >= right;
+      case "<=": return left <= right;
+      default: return false;
     }
   }
 
@@ -202,38 +274,50 @@ export class PipelineEngine {
       switch (strategy) {
         case "abort":
           this.logger.error(`Step '${step.step}' failed, aborting pipeline`, error);
-          return false; // Don't handle, let it throw
+          return false;
 
         case "skip":
           this.logger.warn(`Step '${step.step}' failed, skipping (on_fail: skip)`);
           ExecutionContextManager.setStepResult(context, step.step, {
             output: null,
             success: false,
-            error,
+            // skip does NOT record error — it's a deliberate skip, not a failure
             duration_ms: 0,
           });
-          return true; // Handled
+          return true;
 
         case "continue":
-          this.logger.warn(`Step '${step.step}' failed, continuing (on_fail: continue)`);
+          this.logger.warn(`Step '${step.step}' failed, continuing with error recorded (on_fail: continue)`);
           ExecutionContextManager.setStepResult(context, step.step, {
             output: null,
             success: false,
-            error,
+            error,  // continue DOES record error so subsequent when: can detect
             duration_ms: 0,
           });
-          return true; // Handled
+          return true;
 
         default:
           return false;
       }
     } else if (typeof strategy === "object" && "retry" in strategy) {
-      // Retry strategy
-      const retries = strategy.retry;
-      this.logger.info(`Step '${step.step}' failed, retrying ${retries} times`);
+      const retryVal = strategy.retry;
 
-      for (let i = 0; i < retries; i++) {
-        this.logger.debug(`Retry attempt ${i + 1}/${retries} for step '${step.step}'`);
+      // Support both old {retry: number} and new {retry: RetryConfig}
+      const config: RetryConfig = typeof retryVal === "number"
+        ? { max_attempts: retryVal, backoff: "fixed", initial_delay_ms: 500 }
+        : retryVal as RetryConfig;
+
+      this.logger.info(`Step '${step.step}' failed, retrying ${config.max_attempts} times (backoff: ${config.backoff || "fixed"})`);
+
+      for (let i = 0; i < config.max_attempts; i++) {
+        // Exponential or fixed backoff with jitter
+        if (i > 0) {
+          const delay = this.computeBackoff(i, config);
+          this.logger.debug(`Retry delay: ${delay}ms for attempt ${i + 1}/${config.max_attempts}`);
+          await this.sleep(delay);
+        }
+
+        this.logger.debug(`Retry attempt ${i + 1}/${config.max_attempts} for step '${step.step}'`);
 
         const resolvedArgs = this.templateResolver.resolve(step.args || {}, context);
         const result = await this.executeStep(step, resolvedArgs, context);
@@ -245,18 +329,39 @@ export class PipelineEngine {
           if (step.output) {
             ExecutionContextManager.setShared(context, step.output, result.output);
           }
-          return true; // Handled successfully
+          return true;
         }
 
-        // If last retry also failed
-        if (i === retries - 1) {
-          this.logger.error(`Step '${step.step}' failed after ${retries} retries`, result.error);
+        if (i === config.max_attempts - 1) {
+          this.logger.error(`Step '${step.step}' failed after ${config.max_attempts} retries`, result.error);
           return false;
         }
       }
     }
 
     return false;
+  }
+
+  private computeBackoff(attempt: number, config: RetryConfig): number {
+    const initial = config.initial_delay_ms || 500;
+    const max = config.max_delay_ms || 30000;
+
+    let delay: number;
+    if (config.backoff === "exponential") {
+      delay = initial * Math.pow(2, attempt - 1);
+    } else {
+      delay = initial;
+    }
+
+    // Add jitter (±25%)
+    const jitter = delay * 0.25 * (Math.random() * 2 - 1);
+    delay = Math.round(delay + jitter);
+
+    return Math.min(delay, max);
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**

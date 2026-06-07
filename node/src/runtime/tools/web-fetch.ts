@@ -3,6 +3,7 @@ import http from "http";
 import { URL } from "url";
 import { Tool } from "../pipeline.js";
 import { ExecutionContext } from "../types.js";
+import { getPolicyRegistry, BLOCKED_IP_RANGES } from "../policy.js";
 
 /**
  * Web Fetch tool
@@ -45,6 +46,26 @@ export class WebFetchTool implements Tool {
     const timeout = args.timeout || 30000;
     const followRedirects = args.follow_redirects !== false;
     const maxRedirects = args.max_redirects || 10;
+
+    // Security: check network access policy
+    const agentName = context.agent?.identity?.name || context.agent?.name || "unknown";
+    const policy = getPolicyRegistry().get(agentName);
+    if (!policy.allowNetwork) {
+      throw new Error(
+        `web_fetch: Network access is blocked by security policy. ` +
+        `Use --trusted flag to allow network requests for agent '${agentName}'.`
+      );
+    }
+
+    // Security: block requests to internal IP ranges
+    const hostname = parsedUrl.hostname;
+    for (const pattern of BLOCKED_IP_RANGES) {
+      if (pattern.test(hostname)) {
+        throw new Error(
+          `web_fetch: Access to internal IP range is blocked: ${hostname}`
+        );
+      }
+    }
 
     const startTime = Date.now();
 

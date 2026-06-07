@@ -90,18 +90,33 @@ export class TemplateResolver {
 
     // Access specific field
     const field = parts[2];
+    let value: any;
     switch (field) {
       case "output":
-        return result.output;
+        value = result.output;
+        break;
       case "success":
-        return result.success;
+        value = result.success;
+        break;
       case "error":
-        return result.error;
+        value = result.error;
+        break;
       case "duration_ms":
-        return result.duration_ms;
+        value = result.duration_ms;
+        break;
       default:
         return undefined;
     }
+
+    // Support deeper nested access: {{steps.stepname.output.field.subfield}}
+    for (let i = 3; i < parts.length && value !== undefined && value !== null; i++) {
+      if (typeof value === "object") {
+        value = value[parts[i]];
+      } else {
+        return undefined;
+      }
+    }
+    return value;
   }
 
   /**

@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { Tool } from "../pipeline.js";
 import { ExecutionContext } from "../types.js";
+import { getPolicyRegistry } from "../policy.js";
 
 /**
  * Write file tool
@@ -36,6 +37,22 @@ export class WriteFileTool implements Tool {
     const filePath = path.isAbsolute(args.path)
       ? args.path
       : path.resolve(context.cwd, args.path);
+
+    // Security: check allowed paths
+    const agentName = context.agent?.identity?.name || context.agent?.name || "unknown";
+    const policy = getPolicyRegistry().get(agentName);
+    if (policy.allowedPaths.length > 0) {
+      const resolved = path.resolve(filePath);
+      const allowed = policy.allowedPaths.some((p) =>
+        resolved.startsWith(path.resolve(p))
+      );
+      if (!allowed) {
+        throw new Error(
+          `write_file: Path '${filePath}' is outside allowed paths. ` +
+          `Agent '${agentName}' is restricted to: ${policy.allowedPaths.join(", ")}`
+        );
+      }
+    }
 
     // Create parent directories if requested
     const createDirs = args.create_dirs !== false; // Default true

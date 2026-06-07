@@ -1,6 +1,7 @@
 import { execSync } from "child_process";
 import { Tool } from "../pipeline.js";
 import { ExecutionContext } from "../types.js";
+import { getPolicyRegistry, DANGEROUS_COMMAND_PATTERNS } from "../policy.js";
 
 /**
  * Bash tool
@@ -36,6 +37,25 @@ export class BashTool implements Tool {
       ...context.env,
       ...(args.env || {}),
     };
+
+    // Security: check execution policy
+    const agentName = context.agent?.identity?.name || context.agent?.name || "unknown";
+    const policy = getPolicyRegistry().get(agentName);
+    if (!policy.allowBash) {
+      throw new Error(
+        `bash: Shell execution is blocked by security policy. ` +
+        `Use --trusted flag to allow bash commands for agent '${agentName}'.`
+      );
+    }
+
+    // Security: block dangerous command patterns (always enforced)
+    for (const pattern of DANGEROUS_COMMAND_PATTERNS) {
+      if (pattern.test(args.command)) {
+        throw new Error(
+          `bash: Command blocked by security policy. Pattern matched: ${pattern}`
+        );
+      }
+    }
 
     // Timeout (default 2 minutes)
     const timeout = args.timeout || 120000;
