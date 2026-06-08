@@ -54,12 +54,14 @@ export type OnFailStrategy =
   | { retry: RetryConfig };
 
 export interface ExecutionContext {
-  agent: any; // Will be defined later
+  agent: any;
   initialArgs: Record<string, any>;
   sharedContext: Record<string, any>;
   steps: Map<string, StepResult>;
   env: Record<string, string>;
   cwd: string;
+  /** Trace ID propagated through the entire call chain */
+  trace_id?: string;
 }
 
 export interface StepResult {

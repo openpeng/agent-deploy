@@ -13,6 +13,14 @@ import { TemplateResolver } from "./template.js";
 import { ToolRegistry } from "./tool-registry.js";
 import { invokeAgentTool } from "./builtin-tools/invoke-agent.js";
 
+// Simple UUID v4 generator (no dependency needed)
+function generateTraceId(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
 /**
  * Tool interface for pipeline execution
  */
@@ -172,6 +180,9 @@ export class PipelineEngine {
     const timeoutId = setTimeout(() => controller.abort(new Error("Pipeline timeout")), effectiveTimeout);
 
     try {
+      // Generate trace_id for this execution
+      if (!context.trace_id) context.trace_id = generateTraceId();
+
       this.logger.debug(`Starting pipeline execution with ${yaml.pipeline.length} steps`);
 
       // Initialize shared context from yaml
@@ -217,6 +228,9 @@ export class PipelineEngine {
 
         // Execute step (with step-level timeout if specified)
         const result = await this.executeStep(expandedStep, resolvedArgs, context);
+
+        // Structured JSON log
+        this.jsonLog(context.trace_id, expandedStep.step, result);
 
         // If step failed, handle the error
         if (!result.success && result.error) {
@@ -551,6 +565,20 @@ export class PipelineEngine {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Output structured JSON log for monitoring/observability.
+   */
+  private jsonLog(traceId: string | undefined, stepName: string, result: StepResult): void {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      trace_id: traceId,
+      step: stepName,
+      success: result.success,
+      duration_ms: result.duration_ms,
+      error: result.error?.message || undefined,
+    }));
   }
 
   /**

@@ -115,7 +115,7 @@ export const invokeAgentTool = {
       throw new Error(`Invalid worker.yaml in ${agentName}: ${validation.errors.join(", ")}`);
     }
 
-    // 6. 创建子 agent 执行上下文（继承父 agent 的环境变量和策略）
+    // 6. 创建子 agent 执行上下文（继承父 agent 的环境变量、策略和 trace_id）
     const subCwd = cwd || agentDir;
     const parentEnv = ExecutionContextManager.getAllEnv(context) || {};
     const subContext = ExecutionContextManager.create({
@@ -124,6 +124,8 @@ export const invokeAgentTool = {
       cwd: subCwd,
       env: { ...parentEnv, ...((input as any)?.__env || {}) },
     });
+    // Propagate trace_id through the call chain
+    if (context.trace_id) subContext.trace_id = context.trace_id;
 
     // 将 registry 附加到子 context，支持嵌套 invoke_agent
     ToolRegistry.attach(registry, subContext);
