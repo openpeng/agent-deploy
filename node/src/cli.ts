@@ -33,6 +33,7 @@ import { LLMChatTool } from "./runtime/tools/llm-chat.js";
 import { WebFetchTool } from "./runtime/tools/web-fetch.js";
 import { WebSearchTool } from "./runtime/tools/web-search.js";
 import { invokeAgentTool } from "./runtime/builtin-tools/invoke-agent.js";
+import { listAgentsTool } from "./runtime/builtin-tools/list-agents.js";
 import { V2CompatibilityLayer } from "./runtime/v2-compat.js";
 import { getPolicyRegistry } from "./runtime/policy.js";
 import { MCPToolLoader } from "./runtime/mcp-integration.js";
@@ -985,6 +986,7 @@ Examples:
     registry.register(new WebFetchTool());
     registry.register(new WebSearchTool());
     registry.register(invokeAgentTool);
+    registry.register(listAgentsTool);
 
     // Register MCP tools from agent's mcp/ directory (non-fatal if unavailable)
     const mcpLoader = new MCPToolLoader();
@@ -1045,6 +1047,9 @@ Examples:
     // Create pipeline engine with optional verbose logging
     const logger = new ConsoleLogger(values.verbose as boolean);
     const engine = new PipelineEngine(registry, logger);
+
+    // Auto-register sub-agents from agent.json (enables `invoke: name` shorthand)
+    engine.registerSubagents(resolvedAgentDir, registry);
 
     // Execute pipeline
     console.log("⏳ Executing pipeline...\n");

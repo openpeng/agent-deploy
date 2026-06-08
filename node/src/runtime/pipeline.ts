@@ -1,3 +1,5 @@
+import * as fs from "fs";
+import * as path from "path";
 import {
   WorkerYaml,
   PipelineStep,
@@ -9,6 +11,7 @@ import {
 import { ExecutionContextManager } from "./context.js";
 import { TemplateResolver } from "./template.js";
 import { ToolRegistry } from "./tool-registry.js";
+import { invokeAgentTool } from "./builtin-tools/invoke-agent.js";
 
 /**
  * Tool interface for pipeline execution
@@ -70,6 +73,93 @@ export class PipelineEngine {
   }
 
   /**
+   * Execute parallel invocations — all sub-agents run concurrently.
+   * Returns aggregated step result.
+   */
+  private async executeParallel(
+    step: PipelineStep,
+    context: ExecutionContext
+  ): Promise<StepResult> {
+    const invocations = step.invoke_parallel!;
+    const startTime = Date.now();
+    const results: Array<{ agent: string; success: boolean; output?: any; error?: string }> = [];
+
+    const promises = invocations.map(async (inv) => {
+      const expandedStep = this.expandInvokeShorthand({
+        step: `${step.step}/${inv.agent}`,
+        invoke: inv.agent,
+        with: inv.with || {},
+      });
+      const resolvedArgs = this.templateResolver.resolve(expandedStep.args || {}, context);
+      return this.executeStep(expandedStep, resolvedArgs, context);
+    });
+
+    const settled = await Promise.allSettled(promises);
+
+    let allSuccess = true;
+    let firstError: Error | undefined;
+
+    for (const r of settled) {
+      if (r.status === "fulfilled") {
+        const sr = r.value;
+        results.push({ agent: "?", success: sr.success, output: sr.output, error: sr.error?.message });
+        if (!sr.success) {
+          allSuccess = false;
+          if (!firstError && sr.error) firstError = sr.error;
+        }
+      } else {
+        results.push({ agent: "?", success: false, error: r.reason?.message });
+        allSuccess = false;
+        if (!firstError) firstError = r.reason;
+      }
+    }
+
+    const duration = Date.now() - startTime;
+    this.logger.info(`Parallel step '${step.step}' completed in ${duration}ms — ${results.filter(r => r.success).length}/${results.length} succeeded`);
+
+    return {
+      output: { agents: results, total: results.length, succeeded: results.filter(r => r.success).length },
+      success: allSuccess,
+      error: firstError,
+      duration_ms: duration,
+    };
+  }
+
+  /**
+   * Apply result mapping (`as` field) to extract sub-agent output fields
+   * into shared_context for downstream steps.
+   *
+   * worker.yaml:
+   *   as:
+   *     summary: "{{output.content}}"
+   *     model:   "{{output.model}}"
+   */
+  private applyResultMapping(step: PipelineStep, result: StepResult, context: ExecutionContext): void {
+    if (!step.as || !result.success) return;
+
+    for (const [key, template] of Object.entries(step.as)) {
+      const fakeContext = {
+        output: result.output,
+        result: result,
+      };
+      // Use template resolver in a context that has `output` as a variable
+      try {
+        const resolved = template.replace(/\{\{([^}]+)\}\}/g, (_match, path) => {
+          const parts = path.trim().split(".");
+          let value: any = fakeContext;
+          for (const p of parts) {
+            if (value && typeof value === "object") value = value[p];
+            else return "";
+          }
+          return value !== undefined && value !== null ? String(value) : "";
+        });
+        ExecutionContextManager.setShared(context, key, resolved);
+      } catch (e) {
+        this.logger.warn(`Failed to resolve 'as' mapping for ${key}: ${template}`);
+      }
+    }
+  }
+  /**
    * Execute a pipeline with optional global timeout.
    */
   async execute(
@@ -95,34 +185,56 @@ export class PipelineEngine {
       for (const step of yaml.pipeline) {
         if (controller.signal.aborted) break;
 
-        this.logger.debug(`Executing step: ${step.step}`);
-
         // Check condition
         if (step.when && !this.evaluateCondition(step.when, context)) {
           this.logger.debug(`Step '${step.step}' skipped by condition: ${step.when}`);
           continue;
         }
 
+        // Handle parallel invocation
+        if (step.invoke_parallel && step.invoke_parallel.length > 0) {
+          const result = await this.executeParallel(step, context);
+          if (!result.success && result.error) {
+            const handled = await this.handleError(step, result.error, context);
+            if (!handled) throw result.error;
+          } else {
+            ExecutionContextManager.setStepResult(context, step.step, result);
+            if (step.output) {
+              ExecutionContextManager.setShared(context, step.output, result.output);
+            }
+            this.applyResultMapping(step, result, context);
+          }
+          continue;
+        }
+
+        // Expand `invoke` shorthand to `tool: invoke_agent + args: { agent, input }`
+        const expandedStep = this.expandInvokeShorthand(step);
+
+        this.logger.debug(`Executing step: ${expandedStep.step}`);
+
         // Resolve template variables in args
-        const resolvedArgs = this.templateResolver.resolve(step.args || {}, context);
+        const resolvedArgs = this.templateResolver.resolve(expandedStep.args || {}, context);
 
         // Execute step (with step-level timeout if specified)
-        const result = await this.executeStep(step, resolvedArgs, context);
+        const result = await this.executeStep(expandedStep, resolvedArgs, context);
 
         // If step failed, handle the error
         if (!result.success && result.error) {
-          const handled = await this.handleError(step, result.error, context);
+          const handled = await this.handleError(expandedStep, result.error, context);
           if (!handled) {
             throw result.error;
           }
         } else if (result.success) {
           // Store result for successful steps
-          ExecutionContextManager.setStepResult(context, step.step, result);
+          ExecutionContextManager.setStepResult(context, expandedStep.step, result);
 
           // Store output in shared context if specified
-          if (step.output) {
-            ExecutionContextManager.setShared(context, step.output, result.output);
+          if (expandedStep.output) {
+            ExecutionContextManager.setShared(context, expandedStep.output, result.output);
           }
+
+          // Apply result mapping for invoke steps
+          this.applyResultMapping(step, result, context);
         }
       }
 
@@ -133,14 +245,91 @@ export class PipelineEngine {
   }
 
   /**
-   * Execute a single step
+   * Expand `invoke` shorthand to a full `invoke_agent` tool call.
+   *
+   * worker.yaml:
+   *   - step: do_thing
+   *     invoke: text-summarizer
+   *     with:
+   *       input_file: "data.md"
+   *
+   * Expands to:
+   *   - step: do_thing
+   *     tool: invoke_agent
+   *     args:
+   *       agent: "text-summarizer"
+   *       input:
+   *         input_file: "data.md"
    */
+  private expandInvokeShorthand(step: PipelineStep): PipelineStep {
+    if (!step.invoke) return step;
+
+    return {
+      step: step.step,
+      tool: "invoke_agent",
+      args: {
+        agent: step.invoke,
+        input: step.with || {},
+      },
+      output: step.output,
+      when: step.when,
+      on_fail: step.on_fail,
+      timeout_ms: step.timeout_ms,
+    };
+  }
+
+  /**
+   * Register sub-agents from agent.json into the tool registry.
+   * This makes all declared subagents callable via `invoke: name`
+   * without needing to specify paths.
+   */
+  registerSubagents(agentDir: string, registry: ToolRegistry): void {
+    const agentJsonPath = path.join(agentDir, "agent.json");
+    if (!fs.existsSync(agentJsonPath)) return;
+
+    try {
+      const agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
+      const subagents = agentJson.subagents;
+      if (!subagents || !Array.isArray(subagents)) return;
+
+      for (const sa of subagents) {
+        if (!sa.name || sa.name === "worker") continue; // Skip self-reference
+
+        let agentPath = sa.path || "";
+        if (agentPath && !path.isAbsolute(agentPath) && !agentPath.startsWith("market://")) {
+          // Resolve relative to agentDir, but if path is a YAML file, use its parent dir
+          const resolved = path.resolve(agentDir, agentPath);
+          agentPath = fs.existsSync(path.join(resolved, "agent.json")) ? resolved
+            : fs.existsSync(path.join(path.dirname(resolved), "agent.json")) ? path.dirname(resolved)
+            : resolved;
+        }
+
+        // Register a wrapper that calls invoke_agent with the resolved path
+        const toolName = `agent/${sa.name}`;
+        const wrapper = {
+          name: toolName,
+          description: sa.description || `Invoke sub-agent: ${sa.name}`,
+          async execute(inputArgs: any, ctx: ExecutionContext) {
+            return await invokeAgentTool.execute(
+              { agent: agentPath, input: inputArgs },
+              ctx
+            );
+          },
+        };
+
+        registry.register(wrapper);
+        this.logger.debug(`Registered sub-agent: ${sa.name} → ${agentPath}`);
+      }
+    } catch (e) {
+      this.logger.warn(`Failed to register subagents from ${agentDir}: ${(e as Error).message}`);
+    }
+  }
   private async executeStep(
     step: PipelineStep,
     args: any,
     context: ExecutionContext
   ): Promise<StepResult> {
-    const tool = this.toolRegistry.get(step.tool);
+    const tool = this.toolRegistry.get(step.tool || "");
     if (!tool) {
       return {
         output: null,

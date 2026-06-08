@@ -110,13 +110,36 @@ export class WorkerYamlParser {
           stepNames.add(step.step);
         }
 
-        // Check tool reference - allow builtin tools or declared tools
-        if (!step.tool) {
-          errors.push(`Step '${step.step}' is missing 'tool' field`);
-        } else if (!declaredToolNames.has(step.tool) && !builtinTools.has(step.tool)) {
+        // Check tool reference - allow `invoke`, `invoke_parallel` or `tool`
+        if (!step.tool && !step.invoke && !step.invoke_parallel) {
+          errors.push(`Step '${step.step}' is missing 'tool', 'invoke', or 'invoke_parallel' field`);
+        } else if (step.tool && !declaredToolNames.has(step.tool) && !builtinTools.has(step.tool)) {
           errors.push(
             `Step '${step.step}' references undefined tool: ${step.tool}`
           );
+        }
+
+        // Validate invoke shorthand
+        if (step.invoke) {
+          if (!step.with || Object.keys(step.with).length === 0) {
+            errors.push(
+              `Step '${step.step}' uses 'invoke' but is missing 'with' field for input args`
+            );
+          }
+        }
+
+        // Validate invoke_parallel
+        if (step.invoke_parallel) {
+          if (!Array.isArray(step.invoke_parallel) || step.invoke_parallel.length === 0) {
+            errors.push(`Step '${step.step}' has empty 'invoke_parallel' array`);
+          } else {
+            for (let j = 0; j < step.invoke_parallel.length; j++) {
+              const inv = step.invoke_parallel[j];
+              if (!inv.agent) {
+                errors.push(`Step '${step.step}' invoke_parallel[${j}] is missing 'agent'`);
+              }
+            }
+          }
         }
 
         // Validate on_fail strategy

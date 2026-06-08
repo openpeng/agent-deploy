@@ -76,14 +76,22 @@ export const invokeAgentTool = {
       }
     }
 
-    // 2. 验证 agent 目录存在
+    // 2. 预检：验证 agent 目录和必需文件存在
     if (!fs.existsSync(agentDir)) {
-      throw new Error(`Agent not found: ${agentDir}`);
+      throw new Error(`invoke_agent: Sub-agent directory not found: ${agentDir}\n` +
+        `  Check that the agent path is correct and the sub-agent exists`);
     }
 
     const agentJsonPath = path.join(agentDir, "agent.json");
     if (!fs.existsSync(agentJsonPath)) {
-      throw new Error(`agent.json not found in: ${agentDir}`);
+      throw new Error(`invoke_agent: agent.json not found in: ${agentDir}\n` +
+        `  The directory exists but does not contain a valid agent definition`);
+    }
+
+    const workerYamlPath = path.join(agentDir, "worker.yaml");
+    if (!fs.existsSync(workerYamlPath) && !fs.existsSync(path.join(agentDir, "SKILL.md"))) {
+      throw new Error(`invoke_agent: No worker.yaml or SKILL.md found in: ${agentDir}\n` +
+        `  The agent must have a pipeline definition (worker.yaml) or SKILL.md to execute`);
     }
 
     // 3. 加载 agent 元数据
@@ -123,24 +131,16 @@ export const invokeAgentTool = {
     // 7. 使用 context 中的 registry 创建 engine（Phase 6）
     const engine = new PipelineEngine(registry);
 
-    try {
-      const result = await engine.execute(workerYaml, subContext);
+    // Execute sub-agent pipeline. On failure, throw so the parent Pipeline's
+    // on_fail/retry mechanism can take over (instead of silently swallowing errors).
+    const result = await engine.execute(workerYaml, subContext);
 
-      console.log(`  ✓ Sub-agent ${agentName} completed`);
+    console.log(`  ✓ Sub-agent ${agentName} completed`);
 
-      return {
-        success: true,
-        agent: agentName,
-        result: result,
-      };
-    } catch (error) {
-      console.error(`  ✗ Sub-agent ${agentName} failed:`, error);
-
-      return {
-        success: false,
-        agent: agentName,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
+    return {
+      success: true,
+      agent: agentName,
+      result: result,
+    };
   },
 };

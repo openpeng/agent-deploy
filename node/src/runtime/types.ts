@@ -21,12 +21,22 @@ export type ToolType = "builtin" | "custom" | "subagent" | "mcp" | "skill";
 
 export interface PipelineStep {
   step: string;
-  tool: string;
+  tool?: string;
   args?: Record<string, any>;
   output?: string;
   when?: string;
   on_fail?: OnFailStrategy;
-  timeout_ms?: number;  // Per-step timeout in milliseconds
+  timeout_ms?: number;
+
+  /** Shorthand for invoke_agent */
+  invoke?: string;
+  with?: Record<string, any>;
+
+  /** Parallel invocation: run multiple sub-agents concurrently */
+  invoke_parallel?: Array<{ agent: string; with?: Record<string, any> }>;
+
+  /** Result mapping: extract fields from invoke output into shared_context */
+  as?: Record<string, string>;
 }
 
 export interface RetryConfig {
