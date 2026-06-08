@@ -9,6 +9,7 @@ import { existsSync } from "fs";
 import fs from "fs";
 import { resolve } from "path";
 import * as path from "path";
+import { homedir } from "os";
 import * as yaml from "js-yaml";
 import { ImportManager } from "./import-manager.js";
 import { CursorImportAdapter } from "./adapters/cursor-import.js";
@@ -69,7 +70,8 @@ Commands:
   upload <agent-dir>    Upload agent to Market
   deploy <agent-dir>    Deploy agent to AI coding tool(s)
   run <agent-dir>       Execute agent with runtime engine
-  use <agent-id|dir>    Download from market + adapt + install in one step
+  use <agent-id|dir>    Download + adapt + install (local by default)
+  clean [agent-id]      Clean global agent installations
   list                  List local agents
   search <query>        Search agents in Market
   info <agent-id>       Show detailed agent information
@@ -1100,7 +1102,7 @@ async function handleUseCommand(args: string[]) {
       options: {
         market: { type: "string", short: "m" },
         output: { type: "string", short: "o" },
-        level: { type: "string", short: "l", default: "both" },
+        global: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
       allowPositionals: true,
@@ -1138,7 +1140,7 @@ Examples:
       process.exit(1);
     }
 
-    const level = (values.level as string) || "both";
+    const isGlobal = values.global as boolean;
     let agentPath: string;
 
     // Determine if input is a local directory or a market agent ID
@@ -1152,7 +1154,7 @@ Examples:
       console.log(`📥 Downloading agent from Market: ${input}...\n`);
 
       const marketUrl = values.market as string || process.env.MARKET_API_URL || "http://localhost:8321";
-      const outputDir = values.output ? resolve(values.output as string) : resolve("./downloaded-agents");
+      const outputDir = values.output ? resolve(values.output as string) : resolve("./agents");
 
       const result = await downloadAgent({
         agentId: input,
@@ -1162,6 +1164,7 @@ Examples:
 
       agentPath = result.output_path;
       console.log(`✅ Downloaded to: ${agentPath}\n`);
+      console.log(`📁 Agent stored locally (not installed globally). Use 'agent-deploy run ${agentPath}' to execute.\n`);
     }
 
     // Verify agent.json exists
@@ -1185,7 +1188,15 @@ Examples:
     console.log(`   This agent will run in RESTRICTED mode by default.`);
     console.log(`   Use 'agent-deploy run --trusted' if you trust this publisher.\n`);
 
-    // Auto-detect installed tools, always include codebuddy_agent
+    if (!isGlobal) {
+      console.log(`📁 Local mode: Agent stored at ${agentPath}`);
+      console.log(`   Use: agent-deploy run ${path.relative(process.cwd(), agentPath)} --trusted`);
+      console.log(`   Or add --global flag to install to AI tools globally.\n`);
+      return; // Don't install globally
+    }
+
+    // --global mode: auto-detect and install to AI tools
+    const level = "both"; // global install to both project and user level
     const detected = detectAll();
     const toolsToInstall = new Set<string>();
 
@@ -1378,11 +1389,75 @@ async function main() {
     await handleInitCommand(args.slice(1));
   } else if (command === "templates") {
     await handleTemplatesCommand(args.slice(1));
+  } else if (command === "clean") {
+    await handleCleanCommand(args.slice(1));
   } else {
     console.error(`❌ Unknown command: ${command}\n`);
-    console.error("Available commands: import, upload, deploy, run, use, list, search, info, init, templates");
+    console.error("Available commands: import, upload, deploy, run, use, list, search, info, init, templates, clean");
     console.error("Run 'agent-deploy --help' for more information");
     process.exit(1);
+  }
+}
+
+/**
+ * Clean global agent installations from AI tool directories.
+ */
+async function handleCleanCommand(args: string[]) {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      help: { type: "boolean", short: "h", default: false },
+    },
+    allowPositionals: true,
+  });
+
+  if (values.help) {
+    console.log(`
+Usage: agent-deploy clean [agent-name]
+
+Remove globally installed agents from AI tool directories.
+Without arguments, lists all global installations.
+
+Arguments:
+  [agent-name]    Name of agent to remove (optional)
+
+Examples:
+  agent-deploy clean                      # List global installations
+  agent-deploy clean code-reviewer        # Remove code-reviewer from all tools
+`);
+    return;
+  }
+
+  const targetName = positionals[0];
+
+  const globalPaths = [
+    path.join(homedir(), ".codebuddy", "skills"),
+    path.join(homedir(), ".codebuddy", "agents"),
+    path.join(homedir(), ".claude", "commands"),
+  ];
+
+  let cleaned = 0;
+
+  for (const dir of globalPaths) {
+    if (!fs.existsSync(dir)) continue;
+
+    const entries = fs.readdirSync(dir);
+    for (const entry of entries) {
+      if (targetName && entry !== targetName && !entry.startsWith(targetName + ".") && !entry.startsWith(targetName)) continue;
+
+      const fullPath = path.join(dir, entry);
+      if (fs.statSync(fullPath).isFile() || fs.statSync(fullPath).isDirectory()) {
+        fs.rmSync(fullPath, { recursive: true, force: true });
+        console.log(`🧹 Removed: ${fullPath}`);
+        cleaned++;
+      }
+    }
+  }
+
+  if (cleaned === 0) {
+    console.log("📁 No global installations found" + (targetName ? ` for '${targetName}'` : "") + ".");
+  } else {
+    console.log(`\n✅ Cleaned ${cleaned} file(s). Agents now only exist locally in ./agents/`);
   }
 }
 
