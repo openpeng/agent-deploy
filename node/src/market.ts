@@ -10,7 +10,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
-import FormData from "form-data";
+import { Readable } from "stream";
 import { AgentJsonV2 } from "./types.js";
 import { ErrorHandlers } from "./errors.js";
 
@@ -128,27 +128,25 @@ export class MarketClient {
     const packagePath = await this.packAgent(agentDir, agentName, version);
 
     try {
-      // 准备表单数据
-      const form = new FormData();
-      form.append("file", fs.createReadStream(packagePath));
-      form.append("force", options.force ? "true" : "false");
-
-      // 发送请求
       const marketUrl = options.marketUrl || this.baseUrl;
       const apiKey = options.apiKey || this.apiKey;
 
-      const headers: Record<string, string> = {
-        ...form.getHeaders(),
-      };
+      // Use native FormData + Blob for reliable multipart encoding via fetch
+      const formData = new FormData();
+      const fileBuffer = await fs.promises.readFile(packagePath);
+      const blob = new Blob([fileBuffer], { type: "application/gzip" });
+      formData.append("file", blob, `${agentName}-v${version}.tar.gz`);
+      formData.append("force", options.force ? "true" : "false");
 
+      const fetchHeaders: Record<string, string> = {};
       if (apiKey) {
-        headers["Authorization"] = `Bearer ${apiKey}`;
+        fetchHeaders["Authorization"] = `Bearer ${apiKey}`;
       }
 
       const response = await fetch(`${marketUrl}/api/v1/agents`, {
         method: "POST",
-        headers,
-        body: form as any,
+        headers: fetchHeaders,
+        body: formData,
       });
 
       if (!response.ok) {
