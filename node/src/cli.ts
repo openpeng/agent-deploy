@@ -1430,6 +1430,14 @@ Examples:
 
   const targetName = positionals[0];
 
+  // Safety whitelist — never clean these (user's own tools/MCP skills)
+  const SAFE_LIST = ["tapd", "flow-mcp", "aliyun-sls-logs", "bark", "commit"];
+
+  if (targetName && SAFE_LIST.includes(targetName)) {
+    console.log(`⚠️  '${targetName}' is protected. Use system tools to manage this skill.\n`);
+    return;
+  }
+
   const globalPaths = [
     path.join(homedir(), ".codebuddy", "skills"),
     path.join(homedir(), ".codebuddy", "agents"),
@@ -1444,6 +1452,11 @@ Examples:
     const entries = fs.readdirSync(dir);
     for (const entry of entries) {
       if (targetName && entry !== targetName && !entry.startsWith(targetName + ".") && !entry.startsWith(targetName)) continue;
+
+      // Skip protected entries
+      if (!targetName && SAFE_LIST.some(s => entry === s || entry.startsWith(s + ".") || entry.startsWith(s))) {
+        continue;
+      }
 
       const fullPath = path.join(dir, entry);
       if (fs.statSync(fullPath).isFile() || fs.statSync(fullPath).isDirectory()) {
