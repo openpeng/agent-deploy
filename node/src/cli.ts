@@ -63,6 +63,7 @@ Usage:
   agent-deploy info <agent-id> [options]
   agent-deploy init <template> [options]
   agent-deploy templates
+  agent-deploy clean [agent-id]
   agent-deploy --help
   agent-deploy --version
 
@@ -751,7 +752,7 @@ Examples:
       console.log(`Updated:     ${new Date(agent.updated_at).toLocaleString()}`);
       console.log(`\nMarket URL:  ${marketUrl}/agents/${agent.id}`);
 
-      console.log(`\n💡 Download with: agent-deploy download ${agent.id}`);
+      console.log(`\n💡 Install with: agent-deploy use ${agent.id}`);
     }
   } catch (error) {
     handleCommandError(error as Error, 'info');
@@ -856,6 +857,7 @@ Options:
   --args <key=value>    Arguments to pass to agent (key=value or JSON object, repeatable)
   --cwd <dir>           Working directory for agent execution (default: agent directory)
   --env <key=value>     Environment variables (key=value or JSON object, repeatable)
+  --trusted             Trust the agent (allow network, shell, filesystem access)
   -v, --verbose         Verbose output (show step details)
   -h, --help            Show this help message
 
@@ -992,7 +994,10 @@ Examples:
     });
 
     if (!result.success) {
-      console.error(result.output?.error || 'Unknown error');
+      console.error(result.output?.error || 'Pipeline execution failed (no error details available)');
+      if (result.summary?.failed_steps) {
+        console.error(`Summary: ${result.summary.failed_steps} step(s) failed, ${result.summary.total_steps} total`);
+      }
       process.exit(1);
     }
 
@@ -1049,6 +1054,7 @@ async function handleUseCommand(args: string[]) {
       options: {
         market: { type: "string", short: "m" },
         output: { type: "string", short: "o" },
+        level: { type: "string", short: "l" },
         global: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
@@ -1143,7 +1149,7 @@ Examples:
     }
 
     // --global mode: auto-detect and install to AI tools
-    const level = "both"; // global install to both project and user level
+    const level = (values.level as string) || "both"; // read from --level flag, default to both
     const detected = detectAll();
     const toolsToInstall = new Set<string>();
 

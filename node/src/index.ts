@@ -341,8 +341,9 @@ async function handleListAgents(args: Record<string, unknown>): Promise<string> 
         }
       }
     }
-  } catch {}
-
+  } catch (err) {
+    if (process.env.DEBUG) console.warn('[list_agents] agents/ scan warning:', (err as Error).message);
+  }
   // Also check parent directory for sibling agents
   const parentDir = path.dirname(process.cwd());
   try {
@@ -359,7 +360,9 @@ async function handleListAgents(args: Record<string, unknown>): Promise<string> 
         }
       }
     }
-  } catch {}
+  } catch (err) {
+    if (process.env.DEBUG) console.warn('[list_agents] parent dir scan warning:', (err as Error).message);
+  }
 
   // Market discovery
   if (includeMarket) {
@@ -375,8 +378,8 @@ async function handleListAgents(args: Record<string, unknown>): Promise<string> 
           }
         }
       }
-    } catch {
-      // Market unavailable — silently skip
+    } catch (err) {
+      if (process.env.DEBUG) console.warn('[list_agents] Market discovery skipped:', (err as Error).message);
     }
   }
 

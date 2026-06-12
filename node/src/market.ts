@@ -344,6 +344,9 @@ export async function listLocalAgents(options: ListLocalOptions = {}): Promise<A
   if (options.type === 'downloaded' || options.type === 'all' || !options.type) {
     dirs.push(path.resolve(options.outputDir || './', 'downloaded-agents'));
   }
+  if (options.type === 'all' || !options.type) {
+    dirs.push(path.resolve(options.outputDir || './', 'agents'));
+  }
 
   // 扫描每个目录
   for (const dir of dirs) {

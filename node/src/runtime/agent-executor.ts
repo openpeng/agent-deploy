@@ -60,6 +60,15 @@ export class AgentExecutor {
     const agentJson = JSON.parse(fs.readFileSync(path.join(agentDir, 'agent.json'), 'utf-8'));
     const agentName = agentJson.identity?.name || agentJson.name || path.basename(agentDir);
     const workerYaml = new V2CompatibilityLayer().getWorkerYaml(agentDir);
+
+    // Notify when running in V2 compatibility mode
+    if (!fs.existsSync(path.join(agentDir, 'worker.yaml'))) {
+      const v2Check = new V2CompatibilityLayer();
+      if (v2Check.isV2Agent(path.join(agentDir, 'agent.json'))) {
+        console.log(`ℹ️  v2 agent detected — running in compatibility mode\n`);
+      }
+    }
+
     const validation = new WorkerYamlParser().validate(workerYaml);
     if (!validation.valid) throw new Error('Invalid worker.yaml: ' + validation.errors.join(', '));
 
@@ -104,7 +113,9 @@ export class AgentExecutor {
     });
     ToolRegistry.attach(registry, context);
 
-    try { await new DependencyResolver().resolve(agentDir); } catch {}
+    try { await new DependencyResolver().resolve(agentDir); } catch (err) {
+      if (verbose) console.warn(`Dependency resolution warning: ${(err as Error).message}`);
+    }
 
     const engine = new PipelineEngine(registry, new ConsoleLogger(verbose));
     engine.registerSubagents(agentDir, registry);

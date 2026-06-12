@@ -102,21 +102,26 @@ export class PipelineEngine {
       return this.executeStep(expandedStep, resolvedArgs, context);
     });
 
+    // Map invocation index to agent name for result tracking
+    const agentNames = invocations.map(inv => inv.agent);
+
     const settled = await Promise.allSettled(promises);
 
     let allSuccess = true;
     let firstError: Error | undefined;
 
-    for (const r of settled) {
+    for (let i = 0; i < settled.length; i++) {
+      const r = settled[i];
+      const agentName = agentNames[i] || step.step;
       if (r.status === "fulfilled") {
         const sr = r.value;
-        results.push({ agent: "?", success: sr.success, output: sr.output, error: sr.error?.message });
+        results.push({ agent: agentName, success: sr.success, output: sr.output, error: sr.error?.message });
         if (!sr.success) {
           allSuccess = false;
           if (!firstError && sr.error) firstError = sr.error;
         }
       } else {
-        results.push({ agent: "?", success: false, error: r.reason?.message });
+        results.push({ agent: agentName, success: false, error: r.reason?.message });
         allSuccess = false;
         if (!firstError) firstError = r.reason;
       }

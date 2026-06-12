@@ -53,8 +53,8 @@ export const listAgentsTool = {
             }
           }
         }
-      } catch {
-        // Market unavailable, silently skip
+      } catch (err) {
+        if (process.env.DEBUG) console.warn('[list_agents] Market discovery skipped:', (err as Error).message);
       }
     }
 
