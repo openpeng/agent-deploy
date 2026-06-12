@@ -334,4 +334,37 @@ export class MCPToolLoader {
     }
     return wrappers.length;
   }
+
+  /**
+   * Register MCP tools from a runtime config object (not from agent directory).
+   * Used by agent-executor to merge overrides.mcp_servers at execution time.
+   */
+  async registerFromConfig(
+    mcpServers: Record<string, MCPServerEntry>,
+    registry: any
+  ): Promise<number> {
+    let total = 0;
+
+    for (const [serverName, entry] of Object.entries(mcpServers)) {
+      if (entry.type === "http") {
+        const toolDefs = await this.listToolsFromHTTP(serverName, entry);
+        for (const def of toolDefs) {
+          registry.register(new MCPToolWrapper(def, serverName, entry));
+          total++;
+        }
+      } else if (entry.type === "stdio") {
+        const toolDefs = await this.listToolsFromStdio(serverName, entry);
+        for (const def of toolDefs) {
+          registry.register(new MCPToolWrapper(def, serverName, entry));
+          total++;
+        }
+      }
+    }
+
+    if (total > 0) {
+      console.log(`[MCP] Registered ${total} tool(s) from runtime MCP config`);
+    }
+    return total;
+  }
+
 }

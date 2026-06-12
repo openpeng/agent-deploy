@@ -62,6 +62,12 @@ export interface ExecutionContext {
   cwd: string;
   /** Trace ID propagated through the entire call chain */
   trace_id?: string;
+  /**
+   * Agent instructions (system prompt) that override agent.json defaults.
+   * Set by overrides.instructions in execute_agent / invoke_agent.
+   * Read by llm_chat tool when no explicit system_prompt is provided.
+   */
+  instructions?: string;
 }
 
 export interface StepResult {

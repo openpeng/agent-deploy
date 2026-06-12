@@ -15,12 +15,20 @@ import { ToolRegistry } from "../tool-registry.js";
 import { AgentCache } from "../agent-cache.js";
 import { MarketAgentLoader, FileSystemAgentLoader, AgentResolver } from "../agent-loader.js";
 import { getPolicyRegistry } from "../policy.js";
+import { MCPToolLoader, MCPServerEntry } from "../mcp-integration.js";
+import { SkillLoader, SkillDefinition } from "../skill-integration.js";
 
 interface InvokeAgentArgs {
   agent: string;        // Agent 路径 / market:// URL / 简单名称
   input: any;           // 传给子 agent 的输入参数
   cwd?: string;         // 可选：子 agent 的工作目录
   version?: string;     // 可选：指定版本 market:// 下载时使用
+  /** 动态覆盖：instructions / skills / mcp_servers */
+  overrides?: {
+    instructions?: string;
+    skills?: SkillDefinition[];
+    mcp_servers?: Record<string, MCPServerEntry>;
+  };
 }
 
 export const invokeAgentTool = {
@@ -128,10 +136,37 @@ export const invokeAgentTool = {
     if (context.trace_id) subContext.trace_id = context.trace_id;
 
     // 将 registry 附加到子 context，支持嵌套 invoke_agent
-    ToolRegistry.attach(registry, subContext);
+
+    // Handle overrides for sub-agent context and tools
+    let effectiveRegistry = registry;
+    if (args.overrides) {
+      const ovr = args.overrides;
+
+      // Apply instructions override
+      if (ovr.instructions) {
+        ExecutionContextManager.setInstructions(subContext, ovr.instructions);
+      }
+
+      // Apply MCP override: create child registry and register extra MCP tools
+      if (ovr.mcp_servers && Object.keys(ovr.mcp_servers).length > 0) {
+        const mcpLoader = new MCPToolLoader();
+        effectiveRegistry = registry.createChild();
+        await mcpLoader.registerFromConfig(ovr.mcp_servers, effectiveRegistry);
+      }
+
+      // Apply Skills override: register on effective registry
+      if (ovr.skills && ovr.skills.length > 0) {
+        const skillLoader = new SkillLoader();
+        if (effectiveRegistry === registry) {
+          effectiveRegistry = registry.createChild();
+        }
+        skillLoader.registerFromDefs(ovr.skills, effectiveRegistry);
+      }
+    }
+    ToolRegistry.attach(effectiveRegistry, subContext);
 
     // 7. 使用 context 中的 registry 创建 engine（Phase 6）
-    const engine = new PipelineEngine(registry);
+    const engine = new PipelineEngine(effectiveRegistry);
 
     // Execute sub-agent pipeline. On failure, throw so the parent Pipeline's
     // on_fail/retry mechanism can take over (instead of silently swallowing errors).

@@ -13,11 +13,13 @@ export class ExecutionContextManager {
     cwd?: string;
     env?: Record<string, string>;
     sharedContext?: Record<string, any>;
+    instructions?: string;
   }): ExecutionContext {
     return {
       agent: options.agent,
       initialArgs: options.initialArgs,
       sharedContext: options.sharedContext ? { ...options.sharedContext } : {},
+      instructions: options.instructions,
       steps: new Map<string, StepResult>(),
       env: options.env || (process.env as Record<string, string>),
       cwd: options.cwd || process.cwd(),
@@ -108,6 +110,20 @@ export class ExecutionContextManager {
   /**
    * Get the agent
    */
+  /**
+   * Get agent instructions (system prompt)
+   */
+  static getInstructions(context: ExecutionContext): string | undefined {
+    return context.instructions;
+  }
+
+  /**
+   * Set agent instructions
+   */
+  static setInstructions(context: ExecutionContext, instructions: string): void {
+    context.instructions = instructions;
+  }
+
   static getAgent(context: ExecutionContext): any {
     return context.agent;
   }

@@ -148,4 +148,34 @@ export class SkillLoader {
     }
     return skills.length;
   }
+
+  /**
+   * Register skills from runtime SkillDefinition array (not from agent directory).
+   * Used by agent-executor to merge overrides.skills at execution time.
+   *
+   * @param skillDefs - Array of SkillDefinition objects to register
+   * @param registry  - Target ToolRegistry to register skills into
+   * @returns         - Number of skills registered
+   */
+  registerFromDefs(skillDefs: SkillDefinition[], registry: any): number {
+    let count = 0;
+    // agentDir is required for SkillTool constructor but is not used for execution
+    // when skills come from runtime overrides rather than a directory
+    const dummyDir = process.cwd();
+
+    for (const skill of skillDefs) {
+      if (!skill.name || !skill.workerYaml || !Array.isArray(skill.workerYaml.pipeline)) {
+        console.warn(`[WARN] Skipping invalid skill definition: ${skill.name || "unnamed"}`);
+        continue;
+      }
+      registry.register(new SkillTool(skill, dummyDir));
+      count++;
+    }
+
+    if (count > 0) {
+      console.log(`[Skills] Registered ${count} skill(s) from runtime config: ${skillDefs.map(s => s.name).join(", ")}`);
+    }
+    return count;
+  }
+
 }

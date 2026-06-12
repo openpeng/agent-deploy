@@ -23,6 +23,7 @@ import { detectAll } from "./detect.js";
 import { ErrorHandlers, handleCommandError, UserFriendlyError } from "./errors.js";
 import { listTemplates, getTemplate, initFromTemplate } from "./templates.js";
 import { PipelineEngine, ConsoleLogger } from "./runtime/pipeline.js";
+import { AgentExecutor } from "./runtime/agent-executor.js";
 import { ToolRegistry } from "./runtime/tool-registry.js";
 import { ExecutionContextManager } from "./runtime/context.js";
 import { WorkerYaml } from "./runtime/types.js";
@@ -978,88 +979,34 @@ Examples:
     }
     console.log();
 
-    // Create tool registry with all builtin tools
-    const registry = new ToolRegistry();
-    registry.register(new ReadFileTool());
-    registry.register(new WriteFileTool());
-    registry.register(new BashTool());
-    registry.register(new GlobTool());
-    registry.register(new LLMChatTool());
-    registry.register(new WebFetchTool());
-    registry.register(new WebSearchTool());
-    registry.register(invokeAgentTool);
-    registry.register(listAgentsTool);
+    // Execute agent using AgentExecutor (unified execution engine)
+    const result = await AgentExecutor.execute({
+      agent: resolvedAgentDir,
+      input: initialArgs,
+      overrides: {
+        trusted: values.trusted as boolean,
+        cwd: workingDir,
+        env: envVars,
+      },
+      verbose: values.verbose as boolean,
+    });
 
-    // Register MCP tools from agent's mcp/ directory (non-fatal if unavailable)
-    const mcpLoader = new MCPToolLoader();
-    await mcpLoader.registerMCPTools(resolvedAgentDir, registry);
-
-    // Register skills from agent's skills/ directory
-    const skillLoader = new SkillLoader();
-    skillLoader.registerSkills(resolvedAgentDir, registry);
-
-    // Register memory tool bound to agent directory
-    registerMemoryTool(resolvedAgentDir, registry);
-
-    // Security: apply execution policy
-    const policyRegistry = getPolicyRegistry();
-    if (values.trusted) {
-      policyRegistry.trust(agentName);
-      if (values.verbose) {
-        console.log(`[SECURITY] Agent '${agentName}' is running in TRUSTED mode (full access granted)`);
-      }
-    } else {
-      if (values.verbose) {
-        console.log(`[SECURITY] Agent '${agentName}' is running in RESTRICTED mode (no bash, no network, cwd-only fs)`);
-      }
+    if (!result.success) {
+      console.error(result.output?.error || 'Unknown error');
+      process.exit(1);
     }
 
-    // Create execution context, seeding sharedContext from worker.yaml
+    // Restore context for display purposes (AgentExecutor returns its own context)
     const context = ExecutionContextManager.create({
-      agent: { name: agentName, identity: { name: agentName } },
+      agent: { name: result.agent, identity: { name: result.agent } },
       initialArgs,
       cwd: workingDir,
       env: envVars,
-      sharedContext: workerYaml.shared_context || {},
     });
 
-    // Attach registry to context for invoke_agent (Phase 6 improvement)
-    ToolRegistry.attach(registry, context);
+    const duration = result.duration_ms;
 
-    // Resolve dependencies declared in agent.json (Phase 6.3)
-    const resolver = new DependencyResolver();
-    try {
-      console.log("📦 Resolving dependencies...");
-      const deps = await resolver.resolve(resolvedAgentDir);
 
-      if (deps.size > 0) {
-        console.log(`  Dependencies found: ${deps.size}`);
-        for (const [name, dep] of deps) {
-          const sourceLabel = dep.source === "cache" ? "cached" : "downloaded";
-          console.log(`    ✓ ${name}@${dep.version} (${sourceLabel})`);
-        }
-        console.log();
-      }
-    } catch (error) {
-      // Dependency resolution failure is non-fatal — continues with execution
-      console.log(`  ⚠️  Dependency resolution: ${(error as Error).message}`);
-      console.log();
-    }
-
-    // Create pipeline engine with optional verbose logging
-    const logger = new ConsoleLogger(values.verbose as boolean);
-    const engine = new PipelineEngine(registry, logger);
-
-    // Auto-register sub-agents from agent.json (enables `invoke: name` shorthand)
-    engine.registerSubagents(resolvedAgentDir, registry);
-
-    // Execute pipeline
-    console.log("⏳ Executing pipeline...\n");
-    const startTime = Date.now();
-
-    const result = await engine.execute(workerYaml, context);
-
-    const duration = Date.now() - startTime;
 
     // Display results
     console.log("\n✅ Pipeline execution completed!\n");
