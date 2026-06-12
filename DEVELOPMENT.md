@@ -1,176 +1,186 @@
 # agent-deploy — 开发者文档
 
-## 架构概览
+## 技术架构
+
+agent-deploy 有两个实现层：
+
+| 层 | 语言 | 路径 | 职责 |
+|----|------|------|------|
+| **CLI + MCP Server (主)** | TypeScript | `node/` | CLI 10+ 命令、9 MCP 工具、Runtime Engine、Market Client |
+| **Auto-Adapter (辅)** | Python | `src/agent_deploy/` | 工具检测、格式适配、文件安装 |
+
+### Node.js 主实现架构
 
 ```
-┌─────────────────────────────────┐
-│   MCP Client (Claude/Cursor)    │  ← 发送 JSON-RPC 请求
-└──────────────┬──────────────────┘
-               ↕ stdio / JSON-RPC
-┌──────────────┴──────────────────┐
-│   server.py (MCP Server)        │  ← 4 个 tool handler
-│   src/agent_deploy/server.py    │
-└──────────────┬──────────────────┘
-               ↕ Python `import`
-┌──────────────┴──────────────────┐
-│   auto-adapter 脚本              │
-│   detect.py / adapt.py /        │
-│   install.py                    │
-└──────────────┬──────────────────┘
-               ↕ I/O
-┌──────────────┴──────────────────┐
-│   tools-registry.yaml           │
-│   目标工具配置目录               │
-│   (.cursor/, .claude/, ...)     │
-└─────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│ MCP Host (Claude Code / CodeBuddy / Cursor)          │
+│   ↕ stdio / JSON-RPC 2.0                             │
+├─────────────────────────────────────────────────────┤
+│ node/src/index.ts             ← MCP Server (9 工具)   │
+│   ├── deploy_agent                                     │
+│   ├── import_agent                                     │
+│   ├── upload_agent                                     │
+│   ├── download_agent                                   │
+│   ├── adapt_agent                                      │
+│   ├── install_agent                                    │
+│   ├── list_installed_tools                             │
+│   ├── execute_agent       ← ★ Phase 8 新增             │
+│   └── list_agents         ← ★ Phase 8 新增             │
+│                                                         │
+│ node/src/cli.ts              ← CLI 入口 (11 命令)       │
+│   ├── import / deploy / upload                          │
+│   ├── list / search / info                              │
+│   ├── init / templates                                  │
+│   ├── run / use / clean                                 │
+│                                                         │
+│ node/src/runtime/             ← Runtime Engine          │
+│   ├── agent-executor.ts       ← ★ 核心编排 (Phase 8)     │
+│   ├── pipeline.ts             ← Pipeline 执行引擎        │
+│   ├── parser.ts               ← YAML Pipeline 解析器    │
+│   ├── context.ts              ← ExecutionContext         │
+│   ├── tool-registry.ts        ← 分层工具注册表           │
+│   ├── template.ts             ← 模板变量解析器           │
+│   ├── policy.ts               ← 安全策略与沙箱           │
+│   ├── mcp-integration.ts      ← MCP 工具集成             │
+│   ├── skill-integration.ts    ← Skill 集成              │
+│   ├── memory-integration.ts   ← Memory 系统集成         │
+│   ├── agent-cache.ts          ← Agent 缓存              │
+│   ├── agent-loader.ts         ← Agent 来源解析          │
+│   ├── dependency-resolver.ts  ← DFS 依赖解析            │
+│   ├── subagent.ts             ← 子Agent 调用            │
+│   ├── v2-compat.ts            ← V2 兼容层               │
+│   └── tools/                  ← 7 内置工具               │
+│   └── builtin-tools/          ← invoke_agent + list_agents │
+│                                                         │
+│ node/src/adapters/            ← Import 适配器            │
+│   ├── cursor-import.ts                                  │
+│   ├── claude-import.ts                                  │
+│   ├── codebuddy-import.ts                               │
+│   └── github-import.ts                                  │
+└─────────────────────────────────────────────────────┘
 ```
 
-## 桥接机制
+## 核心模块详解
 
-`server.py` 通过以下方式桥接到 `auto-adapter` 脚本：
+### agent-executor.ts (Phase 8)
+核心编排模块，CLI `run` 命令和 MCP `execute_agent` 工具共用。处理：
+1. Agent 来源解析 (local → sibling → cwd → market:// 回退)
+2. Overrides 合并（instructions / skills / MCP / shared_context / trusted / cwd / env）
+3. ToolRegistry 构建（builtin + MCP config + skill defs + sub-agent wrappers）
+4. ExecutionContext 创建
+5. PipelineEngine 调用
 
-### 路径引导
+### pipeline.ts (Phase 5)
+YAML Pipeline 执行引擎 (87 tests)：
+- 串行步骤执行
+- `invoke_parallel` 并行子Agent调用
+- `on_fail` 错误处理: `abort | skip | continue | { retry }`
+- `when` 条件求值
+- Step级超时 (Promise.race) + Pipeline级超时 (AbortController)
+- `as` 结果映射到 shared_context
 
-```python
-THIS_FILE = Path(__file__).resolve()
-WORKSPACE_ROOT = THIS_FILE.parents[4]  # src/agent_deploy → workspace root
-AUTO_ADAPTER_SCRIPTS = WORKSPACE_ROOT / "skills" / "auto-adapter" / "scripts"
-sys.path.insert(0, str(AUTO_ADAPTER_SCRIPTS))
+### tool-registry.ts (Phase 5-6)
+分层工具注册表，无全局状态：
+```
+ToolRegistry
+├── Layer 0: Builtin tools (7 个)
+├── Layer 1: MCP tools (从配置文件)
+├── Layer 2: Skills (从 skill 目录/运行时注入)
+├── Layer 3: Sub-agents (agent/xxx)
+└── Layer 4: Dynamic (运行时注册)
 ```
 
-这允许 `from detect import detect_all` 直接从脚本文件导入，而不需要将 `auto-adapter` 作为正式 Python 包安装。
+### template.ts (Phase 5)
+变量解析器，支持：
+- `{{var}}` — 简单变量
+- `{{steps.X.output}}` — 步骤输出
+- `{{steps.X.output.field.subfield}}` — 嵌套属性
+- `{{shared.key}}` — 共享上下文
+- `{{env.KEY}}` — 环境变量
+- 单变量保持类型，多变量字符串中 String(value) 转换
 
-### Registry 键名修补
+## 新增 Runtime 工具
 
-`tools-registry.yaml` 使用 `project_level` / `user_level` 作为 install 块的键名，但 `install.py` 期望 `project` / `user`。`server.py` 中的 `_patched_load_registry()` 在内存中重写这些键，确保两边的代码都不需要修改。
+### 添加内置工具
+1. 在 `node/src/runtime/tools/` 创建 `my-tool.ts`：
+```typescript
+import { ExecutionContext } from '../context';
+import { ToolParams } from '../types';
 
-```python
-def _patched_load_registry() -> Dict[str, Any]:
-    data = _load_registry()
-    for _tool_key, tool_cfg in data.get("tools", {}).items():
-        install_cfg = tool_cfg.get("install") or {}
-        if "project_level" in install_cfg and "project" not in install_cfg:
-            install_cfg["project"] = install_cfg["project_level"]
-        if "user_level" in install_cfg and "user" not in install_cfg:
-            install_cfg["user"] = install_cfg["user_level"]
-        tool_cfg["install"] = install_cfg
-    return data
-```
-
-在 `_tool_install_agent` 和 `_tool_deploy_agent` 中，我们临时 monkey-patch `install.load_registry`：
-
-```python
-import install as _install_mod
-_original_load_registry = _install_mod.load_registry
-_install_mod.load_registry = _patched_load_registry
-try:
-    results = install_agent(...)
-finally:
-    _install_mod.load_registry = _original_load_registry
-```
-
-## 添加新的 MCP 工具
-
-1. 在 `server.py` 顶部定义 JSON Schema：
-
-```python
-SCHEMA_MY_TOOL: Dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "my_param": {"type": "string", "description": "..."},
-    },
-    "required": ["my_param"],
-    "additionalProperties": False,
+export async function myTool(
+  ctx: ExecutionContext,
+  params: ToolParams & { param1: string }
+) {
+  // 安全策略检查
+  if (!ctx.policy.isToolAllowed('my_tool')) {
+    return { success: false, error: 'Tool not allowed' };
+  }
+  // 业务逻辑
+  return { success: true, result: 'ok' };
 }
 ```
 
-2. 在 `handle_list_tools()` 中注册：
-
-```python
-Tool(name="my_tool", description="...", inputSchema=SCHEMA_MY_TOOL),
+2. 在 `tool-registry.ts` 中注册：
+```typescript
+registry.register('my_tool', {
+  execute: (ctx, params) => myTool(ctx, params),
+  // ...
+});
 ```
 
-3. 实现 handler 函数：
-
-```python
-def _tool_my_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-    # 业务逻辑
-    return {"result": "ok"}
-```
-
-4. 在 `handle_call_tool()` 的 dispatch 分支中添加：
-
-```python
-elif name == "my_tool":
-    result = _tool_my_tool(arguments or {})
-```
-
-## 添加新的目标工具
-
-分两步：
-
-### 1. 注册（tools-registry.yaml）
-
-在 `skills/auto-adapter/config/tools-registry.yaml` 的 `tools:` 下添加新条目，包含 `detection`、`agent_format`、`install` 三个必需块。参考已有的条目（如 `cursor`）作为模板。
-
-### 2. 适配器（adapt.py）
-
-在 `skills/auto-adapter/scripts/adapt.py` 的 `ADAPTERS` 字典中注册一个函数：
-
-```python
-def _adapt_for_my_tool(agent_path: Path) -> Dict[str, Any]:
-    skill_md = (agent_path / "SKILL.md").read_text()
-    frontmatter, body = _parse_skill(skill_md)
-    return {
-        "content": body,
-        "path": f".mytool/commands/{agent_path.name}.md",
-        "tool": "my_tool",
-    }
-
-ADAPTERS["my_tool"] = _adapt_for_my_tool
+### 添加 MCP 工具
+1. 在 `node/src/index.ts` 中注册 handler：
+```typescript
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+  switch (name) {
+    case 'my_tool':
+      return { content: [{ type: 'text', text: JSON.stringify(await myHandler(args)) }] };
+  }
+});
 ```
 
 ## 测试
 
-### 运行单元测试
+### Node.js 主测试 (Vitest)
 
 ```bash
-cd skills/agent-deploy
-pip install -e ".[dev]"
-pytest tests/ -v
+cd agent-deploy/node
+npm test          # 345+ 测试
+npm run test:coverage
 ```
 
-当前测试覆盖：
-- Server 模块导入
-- 4 个工具 handler 的 smoke test（参数校验）
-- Registry patching 正确性
-- Target selection 逻辑
+| 测试套件 | 文件 | 测试数 |
+|----------|------|--------|
+| Export | adapt.test.ts | 22 |
+| Import | import*.test.ts | 31 |
+| Pipeline | runtime-pipeline.test.ts | 87 |
+| Built-in Tools | tools/*.test.ts | 127 |
+| Subagent | subagent.test.ts | 36 |
+| V2 Compat | v2-compat.test.ts | 18 |
+| CLI/E2E | integration/*.test.ts | 13 |
 
-### 手动冒烟测试
+### Python 辅助测试
 
 ```bash
-# 启动 MCP server（在 stdio 模式下）
-python -m agent_deploy.server
-
-# 或用 mcp CLI 工具测试
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python -m agent_deploy.server
+cd agent-deploy && pip install -e ".[dev]" && pytest tests/ -v
 ```
 
-### 端到端测试
+## 构建流程
 
 ```bash
-# 用一个本地 Agent 目录测试完整流程
-python -c "
-from agent_deploy.server import _tool_list_installed_tools, _tool_deploy_agent
-print(_tool_list_installed_tools({}))
-print(_tool_deploy_agent({'agent_path': '/tmp/test-agent', 'dry_run': True}))
-"
+cd agent-deploy/node
+npm run build     # tsc && cp src/templates/*.json dist/templates/
 ```
 
-## 代码风格
+**重要**: tsc 不会自动复制 `.json` 文件，需要在 build 脚本中显式复制。
 
-- **类型注解**：所有函数签名使用 `from __future__ import annotations` + 完整的类型注解
-- **导入顺序**：标准库 → 第三方 → 本地，路径引导后的导入用 `# noqa: E402` 标注
-- **错误处理**：tool handler 内不吞异常；所有异常在 `handle_call_tool` 的 dispatch 层统一捕获并返回结构化错误
-- **工具函数**：handler 为同步函数（非 async），因为在 MCP server 的 async 上下文中通过 `asyncio.to_thread` 运行
-- **临时文件**：`deploy_agent` 中 Market 下载使用 `tempfile.TemporaryDirectory`，在 finally 中清理
+## 代码约定
+
+1. **Context-based 无全局状态** — ToolRegistry 通过 ExecutionContext 传递
+2. **默认不信任** — 所有 Agent 默认受限，需 `--trusted` 显式授权
+3. **工具返回对象** — `{ success: true/false, result/error }` 格式
+4. **invoke_agent 失败 throw** — 让 Pipeline `on_fail` / `retry` 接管
+5. **agent context 双路径** — 同时设置 `{ name }` 和 `{ identity: { name } }`
+6. **Windows 路径正斜杠** — 使用 `/` 非 `\`
+7. **环境变量继承链** — `process.env → ExecutionContext.env → 子Agent → 孙Agent`
