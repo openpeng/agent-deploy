@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import * as fs from "fs";
+import * as path from "path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -15,6 +17,8 @@ import { ClaudeImportAdapter } from "./adapters/claude-import.js";
 import { CodeBuddyImportAdapter } from "./adapters/codebuddy-import.js";
 import { GitHubImportAdapter } from "./adapters/github-import.js";
 import { uploadAgent, downloadAgent } from "./market.js";
+import { AgentExecutor } from "./runtime/agent-executor.js";
+import { MarketClient } from "./market.js";
 
 const SERVER_NAME = "agent-deploy";
 const SERVER_VERSION = "1.0.0";
@@ -104,6 +108,41 @@ const TOOLS: Tool[] = [
         market_url: { type: "string", description: "Market API URL (default: $MARKET_API_URL or http://localhost:8321)" },
       },
       required: ["agent_id"],
+    },
+  },
+  {
+    name: "list_agents",
+    description: "List available agents — local agents and optionally market agents.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        include_market: { type: "boolean", description: "Include market agents (default: true)" },
+      },
+    },
+  },
+  {
+    name: "execute_agent",
+    description: "Execute an agent with full support for dynamic overrides. Customize context, inject skills, and mount MCP servers at runtime.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agent: { type: "string", description: "Agent identifier — name, path, or market://name@version" },
+        input: { type: "object", description: "Input arguments passed to the agent" },
+        overrides: {
+          type: "object",
+          description: "Dynamic overrides",
+          properties: {
+            instructions: { type: "string", description: "Override agent instructions" },
+            skills: { type: "array", description: "Skill definitions to inject" },
+            mcp_servers: { type: "object", description: "MCP server configs to mount" },
+            shared_context: { type: "object", description: "Shared context values" },
+            trusted: { type: "boolean", description: "Trusted mode" },
+            cwd: { type: "string", description: "Working directory" },
+            env: { type: "object", description: "Environment variables" },
+          },
+        },
+      },
+      required: ["agent"],
     },
   },
 ];
@@ -282,6 +321,92 @@ async function handleDownloadAgent(args: Record<string, unknown>): Promise<strin
   }
 }
 
+/**
+ * list_agents — list available agents (local + market)
+ */
+async function handleListAgents(args: Record<string, unknown>): Promise<string> {
+  const includeMarket = args.include_market !== false; // default true
+  const agents: Array<{ name: string; source: string; path?: string }> = [];
+
+  // Scan local agents directory
+  const agentsDir = path.join(process.cwd(), 'agents');
+  try {
+    if (fs.existsSync(agentsDir)) {
+      for (const entry of fs.readdirSync(agentsDir, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          const agentJsonPath = path.join(agentsDir, entry.name, 'agent.json');
+          if (fs.existsSync(agentJsonPath)) {
+            agents.push({ name: entry.name, source: 'local', path: path.join(agentsDir, entry.name) });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    if (process.env.DEBUG) console.warn('[list_agents] agents/ scan warning:', (err as Error).message);
+  }
+  // Also check parent directory for sibling agents
+  const parentDir = path.dirname(process.cwd());
+  try {
+    if (fs.existsSync(parentDir)) {
+      for (const entry of fs.readdirSync(parentDir, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          const agentJsonPath = path.join(parentDir, entry.name, 'agent.json');
+          if (fs.existsSync(agentJsonPath)) {
+            const exists = agents.some(a => a.name === entry.name);
+            if (!exists) {
+              agents.push({ name: entry.name, source: 'local', path: path.join(parentDir, entry.name) });
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    if (process.env.DEBUG) console.warn('[list_agents] parent dir scan warning:', (err as Error).message);
+  }
+
+  // Market discovery
+  if (includeMarket) {
+    try {
+      const marketUrl = process.env.MARKET_API_URL || 'http://localhost:8321';
+      const client = new MarketClient({ baseUrl: marketUrl });
+      const result = await client.searchAgents({ limit: 50 });
+      if (result?.agents) {
+        for (const agent of result.agents) {
+          const name = agent.name || agent.id;
+          if (name && !agents.some(a => a.name === name)) {
+            agents.push({ name, source: 'market', path: 'market://' + name });
+          }
+        }
+      }
+    } catch (err) {
+      if (process.env.DEBUG) console.warn('[list_agents] Market discovery skipped:', (err as Error).message);
+    }
+  }
+
+  return JSON.stringify({ total: agents.length, agents }, null, 2);
+}
+
+/**
+ * execute_agent — execute an agent with full override support
+ */
+async function handleExecuteAgent(args: Record<string, unknown>): Promise<string> {
+  const agent = args.agent as string;
+  if (!agent) throw new Error('agent parameter is required');
+
+  const input = (args.input as Record<string, any>) || {};
+  const overrides = (args.overrides as any) || {};
+
+  const result = await AgentExecutor.execute({
+    agent,
+    input,
+    overrides,
+    verbose: false,
+  });
+
+  return JSON.stringify(result, null, 2);
+}
+
+
 // ---- Server Setup ----
 const server = new Server(
   { name: SERVER_NAME, version: SERVER_VERSION },
@@ -302,6 +427,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "import_agent": result = await handleImportAgent(args ?? {}); break;
       case "upload_agent": result = await handleUploadAgent(args ?? {}); break;
       case "download_agent": result = await handleDownloadAgent(args ?? {}); break;
+      case "list_agents": result = await handleListAgents(args ?? {}); break;
+      case "execute_agent": result = await handleExecuteAgent(args ?? {}); break;
       default: throw new Error(`Unknown tool: ${name}`);
     }
     return { content: [{ type: "text", text: result }] };

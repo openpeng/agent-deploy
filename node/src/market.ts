@@ -9,8 +9,10 @@
 
 import fs from "fs";
 import path from "path";
-import FormData from "form-data";
+import os from "os";
+import { Readable } from "stream";
 import { AgentJsonV2 } from "./types.js";
+import { ErrorHandlers } from "./errors.js";
 
 // ============================================================
 // 类型定义
@@ -65,6 +67,26 @@ export interface AgentInfo {
   updated_at: string;
 }
 
+export interface SearchOptions {
+  query?: string;
+  tag?: string;
+  category?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface SearchResult {
+  agents: AgentInfo[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ListLocalOptions {
+  type?: 'imported' | 'downloaded' | 'all';
+  outputDir?: string;
+}
+
 // ============================================================
 // Market Client
 // ============================================================
@@ -87,13 +109,17 @@ export class MarketClient {
 
     // 验证 agent.json 存在
     if (!fs.existsSync(agentJsonPath)) {
-      throw new Error(`agent.json not found in ${agentDir}`);
+      throw ErrorHandlers.missingAgentJson(agentDir);
     }
 
     // 读取 agent.json
-    const agentJson: AgentJsonV2 = JSON.parse(
-      fs.readFileSync(agentJsonPath, "utf-8")
-    );
+    let agentJson: AgentJsonV2;
+    try {
+      agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      throw ErrorHandlers.invalidAgentJson(agentJsonPath, msg);
+    }
 
     const agentName = agentJson.identity.name;
     const version = agentJson.identity.version;
@@ -102,32 +128,36 @@ export class MarketClient {
     const packagePath = await this.packAgent(agentDir, agentName, version);
 
     try {
-      // 准备表单数据
-      const form = new FormData();
-      form.append("file", fs.createReadStream(packagePath));
-      form.append("force", options.force ? "true" : "false");
-
-      // 发送请求
       const marketUrl = options.marketUrl || this.baseUrl;
       const apiKey = options.apiKey || this.apiKey;
 
-      const headers: Record<string, string> = {
-        ...form.getHeaders(),
-      };
+      // Use native FormData + Blob for reliable multipart encoding via fetch
+      const formData = new FormData();
+      const fileBuffer = await fs.promises.readFile(packagePath);
+      const blob = new Blob([fileBuffer], { type: "application/gzip" });
+      formData.append("file", blob, `${agentName}-v${version}.tar.gz`);
+      formData.append("force", options.force ? "true" : "false");
 
+      const fetchHeaders: Record<string, string> = {};
       if (apiKey) {
-        headers["X-API-Key"] = apiKey;
+        fetchHeaders["Authorization"] = `Bearer ${apiKey}`;
       }
 
       const response = await fetch(`${marketUrl}/api/v1/agents`, {
         method: "POST",
-        headers,
-        body: form as any,
+        headers: fetchHeaders,
+        body: formData,
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || `Upload failed: ${response.statusText}`);
+        if (response.status === 401 || response.status === 403) {
+          throw ErrorHandlers.authenticationError();
+        } else if (response.status === 409) {
+          throw ErrorHandlers.conflictError(agentName, version);
+        } else {
+          const error = await response.json().catch(() => ({ detail: response.statusText }));
+          throw new Error(error.detail || `Upload failed: ${response.statusText}`);
+        }
       }
 
       const result = await response.json();
@@ -158,6 +188,9 @@ export class MarketClient {
     const response = await fetch(url);
 
     if (!response.ok) {
+      if (response.status === 404) {
+        throw ErrorHandlers.notFoundError('Agent', options.agentId);
+      }
       throw new Error(`Download failed: ${response.statusText}`);
     }
 
@@ -205,7 +238,10 @@ export class MarketClient {
     const response = await fetch(url);
 
     if (!response.ok) {
-      throw new Error(`Agent not found: ${agentId}`);
+      if (response.status === 404) {
+        throw ErrorHandlers.notFoundError('Agent', agentId);
+      }
+      throw new Error(`Failed to get agent: ${response.statusText}`);
     }
 
     return await response.json();
@@ -214,36 +250,38 @@ export class MarketClient {
   /**
    * 搜索 Agent
    */
-  async searchAgents(query: string): Promise<AgentInfo[]> {
-    const url = `${this.baseUrl}/api/v1/agents?q=${encodeURIComponent(query)}`;
-    const response = await fetch(url);
+  async searchAgents(options: SearchOptions = {}): Promise<SearchResult> {
+    const params = new URLSearchParams();
+    if (options.query) params.append('q', options.query);
+    if (options.tag) params.append('tag', options.tag);
+    if (options.category) params.append('category', options.category);
+    if (options.limit) params.append('limit', options.limit.toString());
+    if (options.offset) params.append('offset', options.offset.toString());
 
-    if (!response.ok) {
-      throw new Error(`Search failed: ${response.statusText}`);
+    const url = `${this.baseUrl}/api/v1/agents?${params.toString()}`;
+
+    try {
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        throw new Error(`Search failed: ${response.statusText}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes('fetch') || msg.includes('ECONNREFUSED')) {
+        throw ErrorHandlers.marketConnectionError(this.baseUrl);
+      }
+      throw error;
     }
-
-    const result = await response.json();
-    return result.agents || [];
   }
 
   /**
    * 列出所有 Agent
    */
-  async listAgents(options?: { category?: string; limit?: number; offset?: number }): Promise<AgentInfo[]> {
-    const params = new URLSearchParams();
-    if (options?.category) params.append("category", options.category);
-    if (options?.limit) params.append("limit", options.limit.toString());
-    if (options?.offset) params.append("offset", options.offset.toString());
-
-    const url = `${this.baseUrl}/api/v1/agents?${params.toString()}`;
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      throw new Error(`List agents failed: ${response.statusText}`);
-    }
-
-    const result = await response.json();
-    return result.agents || [];
+  async listAgents(limit: number = 50, offset: number = 0): Promise<SearchResult> {
+    return this.searchAgents({ limit, offset });
   }
 
   // ============================================================
@@ -255,7 +293,7 @@ export class MarketClient {
    */
   private async packAgent(agentDir: string, agentName: string, version: string): Promise<string> {
     const tar = await import("tar");
-    const tmpDir = fs.mkdtempSync(path.join(require("os").tmpdir(), "agent-deploy-"));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-deploy-"));
     const packagePath = path.join(tmpDir, `${agentName}-v${version}.tar.gz`);
 
     await tar.create(
@@ -286,6 +324,72 @@ export class MarketClient {
       strip: 1, // 移除顶层目录
     });
   }
+}
+
+// ============================================================
+// 本地 Agent 管理
+// ============================================================
+
+/**
+ * 列出本地的 Agent
+ */
+export async function listLocalAgents(options: ListLocalOptions = {}): Promise<AgentInfo[]> {
+  const agents: AgentInfo[] = [];
+  const dirs: string[] = [];
+
+  // 确定要扫描的目录
+  if (options.type === 'imported' || options.type === 'all' || !options.type) {
+    dirs.push(path.resolve(options.outputDir || './', 'imported-agents'));
+  }
+  if (options.type === 'downloaded' || options.type === 'all' || !options.type) {
+    dirs.push(path.resolve(options.outputDir || './', 'downloaded-agents'));
+  }
+  if (options.type === 'all' || !options.type) {
+    dirs.push(path.resolve(options.outputDir || './', 'agents'));
+  }
+
+  // 扫描每个目录
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const agentDir = path.join(dir, entry.name);
+      const agentJsonPath = path.join(agentDir, 'agent.json');
+
+      if (!fs.existsSync(agentJsonPath)) continue;
+
+      try {
+        const agentJson: AgentJsonV2 = JSON.parse(
+          fs.readFileSync(agentJsonPath, 'utf-8')
+        );
+
+        const stats = fs.statSync(agentJsonPath);
+
+        agents.push({
+          id: agentJson.identity.name,
+          name: agentJson.identity.name,
+          display_name: agentJson.identity.display_name || agentJson.identity.name,
+          version: agentJson.identity.version,
+          description: agentJson.identity.description || '',
+          author: agentJson.identity.author || 'Unknown',
+          category: (agentJson.identity as any).category || 'general',
+          tags: agentJson.identity.tags || [],
+          downloads: 0,
+          rating: 0,
+          created_at: stats.birthtime.toISOString(),
+          updated_at: stats.mtime.toISOString(),
+        });
+      } catch (err) {
+        // Skip invalid agent.json files
+        continue;
+      }
+    }
+  }
+
+  return agents;
 }
 
 // ============================================================

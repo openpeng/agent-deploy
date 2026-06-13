@@ -1,0 +1,32 @@
+pipeline:
+  - step: process_input
+    tool: write_file
+    args:
+      path: "output.txt"
+      content: "Processing data: {{input}}\nTimestamp: {{timestamp}}"
+    output: file_result
+
+  - step: read_result
+    tool: read_file
+    args:
+      path: "output.txt"
+    output: processed_data
+
+  - step: notify_completion
+    tool: invoke_agent
+    args:
+      agent: "notification-agent"  # 在同一父目录下的兄弟 agent
+      input:
+        title: "✅ 数据处理完成"
+        body: "已成功处理数据: {{input}}"
+    output: notification_result
+
+  - step: log_final
+    tool: write_file
+    args:
+      path: "output.txt"
+      content: "\n\n处理完成，通知已发送！\n通知结果: {{steps.notify_completion.output.success}}"
+      mode: append
+
+shared_context:
+  timestamp: "2026-06-07T15:00:00Z"
