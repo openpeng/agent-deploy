@@ -19,6 +19,9 @@ import { GitHubImportAdapter } from "./adapters/github-import.js";
 import { uploadAgent, downloadAgent } from "./market.js";
 import { AgentExecutor } from "./runtime/agent-executor.js";
 import { MarketClient } from "./market.js";
+import { scanDeployedAgents, getDeploymentSummary } from "./scan-deployed.js";
+import { uninstallAgent } from "./uninstall.js";
+import { checkUpdates, getUpdateSummary } from "./check-updates.js";
 
 const SERVER_NAME = "agent-deploy";
 const SERVER_VERSION = "1.0.0";
@@ -38,6 +41,7 @@ const TOOLS: Tool[] = [
       properties: {
         agent_path: { type: "string", description: "Path to the agent directory containing SKILL.md" },
         target_tool: { type: "string", description: "Target tool ID, e.g. 'opencode', 'codebuddy', 'cursor'" },
+        target_file: { type: "string", description: "Custom target file path (relative). If provided, overrides the default path." },
       },
       required: ["agent_path", "target_tool"],
     },
@@ -51,9 +55,10 @@ const TOOLS: Tool[] = [
         adapted_content: { type: "string", description: "The adapted markdown/yaml content" },
         agent_name: { type: "string", description: "Name of the agent" },
         target_tool: { type: "string", description: "Target tool ID" },
+        target_file: { type: "string", description: "Required. Target file path (relative) where the agent should be installed." },
         level: { type: "string", description: "Install level: project, user, or both", default: "both" },
       },
-      required: ["adapted_content", "agent_name", "target_tool"],
+      required: ["adapted_content", "agent_name", "target_tool", "target_file"],
     },
   },
   {
@@ -64,9 +69,46 @@ const TOOLS: Tool[] = [
       properties: {
         agent_path: { type: "string", description: "Path to local agent directory (skip download)" },
         target_tool: { type: "string", description: "Target tool ID, 'auto' for auto-detect, 'all' for all detected", default: "auto" },
+        target_file: { type: "string", description: "Required. Target file path (relative)." },
         level: { type: "string", description: "Install level", default: "both" },
       },
-      required: ["agent_path"],
+      required: ["agent_path", "target_file"],
+    },
+  },
+  {
+    name: "scan_deployed",
+    description: "Scan and list all deployed agents across AI coding tools.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace_root: { type: "string" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "uninstall_agent",
+    description: "Uninstall an agent from a target AI coding tool.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agent_name: { type: "string" },
+        target_tool: { type: "string" },
+        install_path: { type: "string" },
+        level: { type: "string", default: "project" },
+      },
+      required: ["agent_name", "target_tool", "install_path"],
+    },
+  },
+  {
+    name: "check_updates",
+    description: "Check for updates to deployed agents.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        market_url: { type: "string" },
+      },
+      required: [],
     },
   },
   {
@@ -117,6 +159,7 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         include_market: { type: "boolean", description: "Include market agents (default: true)" },
+        include_deployed: { type: "boolean", description: "Include deployed agents (default: true)", default: true },
       },
     },
   },
@@ -166,10 +209,10 @@ async function handleAdaptAgent(args: Record<string, unknown>): Promise<string> 
 }
 
 async function handleInstallAgent(args: Record<string, unknown>): Promise<string> {
-  const { adapted_content, agent_name, target_tool, level } = args as {
-    adapted_content: string; agent_name: string; target_tool: string; level?: string;
+  const { adapted_content, agent_name, target_tool, level, target_file, version } = args as {
+    adapted_content: string; agent_name: string; target_tool: string; level?: string; target_file?: string; version?: string;
   };
-  const results = await installAgent(adapted_content, agent_name, target_tool, level ?? "both", false);
+  const results = await installAgent(adapted_content, agent_name, target_tool, level ?? "both", false, target_file, version);
   return JSON.stringify({ status: "ok", results }, null, 2);
 }
 
@@ -177,6 +220,23 @@ async function handleDeployAgent(args: Record<string, unknown>): Promise<string>
   const agentPath = args.agent_path as string;
   const targetTool = (args.target_tool as string) ?? "auto";
   const level = (args.level as string) ?? "both";
+  const targetFile = args.target_file as string | undefined;
+
+  if (!targetFile) {
+    throw new Error("target_file is required for deploy_agent");
+  }
+
+  // Read agent version from agent.json
+  let agentVersion: string | undefined;
+  try {
+    const agentJsonPath = path.join(agentPath, "agent.json");
+    if (fs.existsSync(agentJsonPath)) {
+      const agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
+      agentVersion = agentJson.identity?.version || agentJson.version;
+    }
+  } catch {
+    // Ignore errors reading version
+  }
 
   // Step 1: detect
   const detected = detectAll();
@@ -192,8 +252,8 @@ async function handleDeployAgent(args: Record<string, unknown>): Promise<string>
   // Step 2: adapt & install for each target
   const allResults: Record<string, unknown>[] = [];
   for (const tt of targetTools) {
-    const adapted = await adaptAgent(agentPath, tt);
-    const results = await installAgent(adapted.content, adapted.slug ?? "agent", tt, level, false);
+    const adapted = await adaptAgent(agentPath, tt, targetFile);
+    const results = await installAgent(adapted.content, adapted.slug ?? "agent", tt, level, false, targetFile, agentVersion);
     allResults.push({ tool: tt, adapt: adapted, install: results });
   }
 
@@ -326,6 +386,7 @@ async function handleDownloadAgent(args: Record<string, unknown>): Promise<strin
  */
 async function handleListAgents(args: Record<string, unknown>): Promise<string> {
   const includeMarket = args.include_market !== false; // default true
+  const includeDeployed = args.include_deployed !== false; // default true
   const agents: Array<{ name: string; source: string; path?: string }> = [];
 
   // Scan local agents directory
@@ -383,6 +444,20 @@ async function handleListAgents(args: Record<string, unknown>): Promise<string> 
     }
   }
 
+  // Include deployed agents
+  if (includeDeployed) {
+    try {
+      const deployed = scanDeployedAgents();
+      for (const d of deployed) {
+        if (!agents.some(a => a.name === d.name)) {
+          agents.push({ name: d.name, source: 'deployed', path: d.path });
+        }
+      }
+    } catch (err) {
+      if (process.env.DEBUG) console.warn('[list_agents] deployed scan warning:', (err as Error).message);
+    }
+  }
+
   return JSON.stringify({ total: agents.length, agents }, null, 2);
 }
 
@@ -404,6 +479,32 @@ async function handleExecuteAgent(args: Record<string, unknown>): Promise<string
   });
 
   return JSON.stringify(result, null, 2);
+}
+
+async function handleScanDeployed(args: Record<string, unknown>): Promise<string> {
+  const workspaceRoot = args.workspace_root as string | undefined;
+  const agents = scanDeployedAgents(workspaceRoot);
+  const summary = getDeploymentSummary(workspaceRoot);
+  return JSON.stringify({ total: agents.length, agents, summary }, null, 2);
+}
+
+async function handleUninstallAgent(args: Record<string, unknown>): Promise<string> {
+  const agentName = args.agent_name as string;
+  const targetTool = args.target_tool as string;
+  const installPath = args.install_path as string;
+  const level = (args.level as string) || "project";
+  if (!agentName || !targetTool || !installPath) {
+    throw new Error("agent_name, target_tool, and install_path are required");
+  }
+  const result = uninstallAgent(agentName, targetTool, installPath, level);
+  return JSON.stringify({ status: "ok", result }, null, 2);
+}
+
+async function handleCheckUpdates(args: Record<string, unknown>): Promise<string> {
+  const marketUrl = args.market_url as string | undefined;
+  const updates = await checkUpdates(marketUrl);
+  const summary = getUpdateSummary(updates);
+  return JSON.stringify({ total: updates.length, updates, summary }, null, 2);
 }
 
 
@@ -429,6 +530,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "download_agent": result = await handleDownloadAgent(args ?? {}); break;
       case "list_agents": result = await handleListAgents(args ?? {}); break;
       case "execute_agent": result = await handleExecuteAgent(args ?? {}); break;
+      case "scan_deployed": result = await handleScanDeployed(args ?? {}); break;
+      case "uninstall_agent": result = await handleUninstallAgent(args ?? {}); break;
+      case "check_updates": result = await handleCheckUpdates(args ?? {}); break;
       default: throw new Error(`Unknown tool: ${name}`);
     }
     return { content: [{ type: "text", text: result }] };

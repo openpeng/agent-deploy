@@ -97,6 +97,7 @@ Deploy Options:
   -t, --tool <name>     Target tool (cursor, claude_code, codebuddy, etc.)
                         Use 'auto' for auto-detect, 'all' for all detected tools
   -l, --level <level>   Install level: project, user, or both (default: both)
+  -f, --target-file <path>  Target file path (relative) where agent should be installed (required)
   -h, --help            Show this help message
 
 Run Options:
@@ -361,6 +362,7 @@ async function handleDeployCommand(args: string[]) {
       options: {
         tool: { type: "string", short: "t" },
         level: { type: "string", short: "l", default: "both" },
+        target_file: { type: "string", short: "f" },
         help: { type: "boolean", short: "h", default: false },
       },
       allowPositionals: true,
@@ -398,6 +400,14 @@ async function handleDeployCommand(args: string[]) {
 
     const targetTool = (values.tool as string) || "auto";
     const level = (values.level as string) || "both";
+    const targetFile = values.target_file as string | undefined;
+
+    if (!targetFile) {
+      console.error("Error: --target-file (-f) is required\n");
+      console.error("Usage: agent-deploy deploy <agent-dir> -f <target-file> [options]");
+      console.error("Run 'agent-deploy deploy --help' for more information");
+      process.exit(1);
+    }
 
     // Detect tools if auto
     let toolsToInstall: string[] = [];
@@ -432,10 +442,10 @@ async function handleDeployCommand(args: string[]) {
         console.log(`📦 Deploying to ${tool}...`);
 
         // Adapt agent
-        const adapted = await adaptAgent(resolvedPath, tool);
+        const adapted = await adaptAgent(resolvedPath, tool, targetFile);
 
         // Install agent
-        await installAgent(adapted.content, agentName, tool, level, false);
+        await installAgent(adapted.content, agentName, tool, level, false, targetFile);
 
         console.log(`✅ Successfully deployed to ${tool}\n`);
         results.push({ tool, success: true });

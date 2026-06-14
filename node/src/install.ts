@@ -2,6 +2,7 @@ import { mkdir, writeFile, appendFile } from "fs/promises";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { loadRegistry, getToolConfig } from "./registry.js";
+import { recordDeployment } from "./state.js";
 
 export interface InstallEntry {
   /** Registry key of the target tool. */
@@ -32,6 +33,8 @@ export async function installAgent(
   targetTool: string,
   level: string,
   dryRun: boolean,
+  targetFile?: string,
+  version?: string,
 ): Promise<InstallEntry[]> {
   const config = getToolConfig(targetTool);
   if (!config) {
@@ -66,6 +69,11 @@ export async function installAgent(
       .replace(/\{agent_name\}/g, agentName)
       .replace(/\{slug\}/g, slug);
 
+    // Override with targetFile if provided
+    if (targetFile) {
+      relPath = targetFile;
+    }
+
     // Strip leading ~/ for user-level paths (root is already homedir)
     relPath = relPath.replace(/^~\//, "");
 
@@ -96,6 +104,7 @@ export async function installAgent(
           level: lvl,
           status: "installed",
         });
+        recordDeployment(agentName, version || "unknown", targetTool, absPath, lvl);
       } catch (err: any) {
         entries.push({
           tool: targetTool,
