@@ -1,5 +1,0 @@
-Processing data: cache hit deps test
-Timestamp: 2026-06-07T15:00:00Z
-
-处理完成，通知已发送！
-通知结果: [object Object]
