@@ -16,7 +16,21 @@ import { CursorImportAdapter } from "./adapters/cursor-import.js";
 import { ClaudeImportAdapter } from "./adapters/claude-import.js";
 import { CodeBuddyImportAdapter } from "./adapters/codebuddy-import.js";
 import { GitHubImportAdapter } from "./adapters/github-import.js";
-import { uploadAgent, downloadAgent, MarketClient, listLocalAgents } from "./market.js";
+import {
+  uploadAgent,
+  downloadAgent,
+  MarketClient,
+  listLocalAgents,
+  uploadTeam,
+  downloadTeam,
+  searchTeams,
+  getTeam,
+  uploadWorkflow,
+  downloadWorkflow,
+  searchWorkflows,
+  getWorkflow,
+  packDirectoryToTarGz,
+} from "./market.js";
 import { adaptAgent } from "./adapt.js";
 import { installAgent } from "./install.js";
 import { detectAll } from "./detect.js";
@@ -63,6 +77,18 @@ Usage:
   agent-deploy info <agent-id> [options]
   agent-deploy init <template> [options]
   agent-deploy templates
+  agent-deploy team package <team-dir> [-o <dir>]
+  agent-deploy team upload <team-dir> [--market <url>] [--api-key <key>] [--force]
+  agent-deploy team download <team-name> [-o <dir>] [--version <ver>] [--market <url>]
+  agent-deploy team list [--tag <tag>] [--category <cat>] [--market <url>]
+  agent-deploy team validate <team-dir>
+
+  agent-deploy workflow package <workflow-dir> [-o <dir>]
+  agent-deploy workflow upload <workflow-dir> [--market <url>] [--api-key <key>] [--force]
+  agent-deploy workflow download <workflow-name> [-o <dir>] [--version <ver>] [--market <url>]
+  agent-deploy workflow list [--tag <tag>] [--category <cat>] [--market <url>]
+  agent-deploy workflow validate <workflow-dir>
+
   agent-deploy clean [agent-id]
   agent-deploy --help
   agent-deploy --version
@@ -79,6 +105,8 @@ Commands:
   info <agent-id>       Show detailed agent information
   init <template>       Create new agent from template
   templates             List available agent templates
+  team <action>         Manage teams (package/upload/download/list/validate)
+  workflow <action>     Manage workflows (package/upload/download/list/validate)
 
 Import Options:
   -o, --output <dir>    Output directory (default: ./imported-agents)
@@ -1352,11 +1380,15 @@ async function main() {
     await handleInitCommand(args.slice(1));
   } else if (command === "templates") {
     await handleTemplatesCommand(args.slice(1));
+  } else if (command === "team") {
+    await handleTeamCommand(args.slice(1));
+  } else if (command === "workflow") {
+    await handleWorkflowCommand(args.slice(1));
   } else if (command === "clean") {
     await handleCleanCommand(args.slice(1));
   } else {
     console.error(`❌ Unknown command: ${command}\n`);
-    console.error("Available commands: import, upload, deploy, run, use, list, search, info, init, templates, clean");
+    console.error("Available commands: import, upload, deploy, run, use, list, search, info, init, templates, team, workflow, clean");
     console.error("Run 'agent-deploy --help' for more information");
     process.exit(1);
   }
@@ -1437,8 +1469,656 @@ Examples:
   }
 }
 
+/**
+ * Handle team subcommand
+ */
+async function handleTeamCommand(args: string[]) {
+  const action = args[0] || "help";
+
+  if (action === "help" || action === "--help" || action === "-h") {
+    console.log(`
+Usage: agent-deploy team <action> [options]
+
+Actions:
+  package <team-dir> [-o <dir>]           Package team directory into tar.gz
+  upload <team-dir> [options]             Upload team to Market
+  download <team-name> [-o <dir>] [opts]  Download team from Market
+  list [options]                          List teams (search Market)
+  validate <team-dir>                     Validate team.json structure
+
+Upload Options:
+  --market <url>     Market API URL (default: $MARKET_API_URL or http://localhost:8321)
+  --api-key <key>    API key for authentication (default: $MARKET_API_KEY)
+  --force            Force overwrite existing version
+
+Download Options:
+  -o, --output <dir>  Output directory (default: ./downloaded-teams)
+  --version <ver>     Specific version to download
+  --market <url>      Market API URL
+
+List Options:
+  --tag <tag>         Filter by tag
+  --category <cat>    Filter by category
+  --market <url>      Market API URL
+
+Examples:
+  agent-deploy team package ./my-team -o ./dist
+  agent-deploy team upload ./my-team --market http://localhost:8321 --api-key mykey --force
+  agent-deploy team download content-gen-team -o ./output --market http://localhost:8321
+  agent-deploy team list --tag automation
+  agent-deploy team validate ./my-team
+`);
+    return;
+  }
+
+  if (action === "package") {
+    try {
+      const { values, positionals } = parseArgs({
+        args: args.slice(1),
+        options: {
+          output: { type: "string", short: "o" },
+          help: { type: "boolean", short: "h", default: false },
+        },
+        allowPositionals: true,
+      });
+
+      if (values.help) {
+        console.log("Package a team directory into a tar.gz archive.\n");
+        console.log("Usage: agent-deploy team package <team-dir> [-o <dir>]");
+        return;
+      }
+
+      const teamDir = positionals[0];
+      if (!teamDir) {
+        console.error("❌ Error: team directory is required\n");
+        console.error("Usage: agent-deploy team package <team-dir> [-o <dir>]");
+        process.exit(1);
+      }
+
+      const resolvedPath = resolve(teamDir);
+      if (!existsSync(resolvedPath)) {
+        throw ErrorHandlers.fileNotFound(resolvedPath, 'directory');
+      }
+
+      const teamJsonPath = path.join(resolvedPath, "team.json");
+      if (!existsSync(teamJsonPath)) {
+        console.error(`❌ Error: team.json not found in ${resolvedPath}`);
+        process.exit(1);
+      }
+
+      const teamJson = JSON.parse(fs.readFileSync(teamJsonPath, "utf-8"));
+      const teamName = teamJson.identity?.name || teamJson.name || path.basename(resolvedPath);
+      const version = teamJson.identity?.version || teamJson.version || "0.0.0";
+
+      const outputDir = values.output ? resolve(values.output as string) : resolve("./dist");
+
+      console.log("📦 Packaging team...\n");
+      const packagePath = await packDirectoryToTarGz(resolvedPath, outputDir, teamName, version);
+
+      console.log(`✅ Team packaged successfully!\n`);
+      console.log(`Team:    ${teamName} v${version}`);
+      console.log(`Output:  ${packagePath}`);
+    } catch (error) {
+      handleCommandError(error as Error, "team package");
+    }
+    return;
+  }
+
+  if (action === "upload") {
+    try {
+      const { values, positionals } = parseArgs({
+        args: args.slice(1),
+        options: {
+          market: { type: "string" },
+          "api-key": { type: "string" },
+          force: { type: "boolean", default: false },
+          help: { type: "boolean", short: "h", default: false },
+        },
+        allowPositionals: true,
+      });
+
+      if (values.help) {
+        console.log("Upload a team to the Market.\n");
+        console.log("Usage: agent-deploy team upload <team-dir> [options]");
+        return;
+      }
+
+      const teamDir = positionals[0];
+      if (!teamDir) {
+        console.error("❌ Error: team directory is required\n");
+        console.error("Usage: agent-deploy team upload <team-dir> [options]");
+        process.exit(1);
+      }
+
+      const resolvedPath = resolve(teamDir);
+      if (!existsSync(resolvedPath)) {
+        throw ErrorHandlers.fileNotFound(resolvedPath, 'directory');
+      }
+
+      console.log("📤 Uploading team to Market...\n");
+
+      const result = await uploadTeam({
+        teamDir: resolvedPath,
+        marketUrl: values.market as string | undefined,
+        apiKey: values["api-key"] as string | undefined,
+        force: values.force as boolean,
+      });
+
+      console.log("✅ Successfully uploaded team!\n");
+      console.log(`Team ID:    ${result.team_id}`);
+      console.log(`Name:       ${result.team_name}`);
+      console.log(`Version:    ${result.version}`);
+      console.log(`Market URL: ${result.market_url}\n`);
+    } catch (error) {
+      handleCommandError(error as Error, "team upload");
+    }
+    return;
+  }
+
+  if (action === "download") {
+    try {
+      const { values, positionals } = parseArgs({
+        args: args.slice(1),
+        options: {
+          output: { type: "string", short: "o" },
+          version: { type: "string" },
+          market: { type: "string" },
+          help: { type: "boolean", short: "h", default: false },
+        },
+        allowPositionals: true,
+      });
+
+      if (values.help) {
+        console.log("Download a team from the Market.\n");
+        console.log("Usage: agent-deploy team download <team-name> [-o <dir>] [options]");
+        return;
+      }
+
+      const teamName = positionals[0];
+      if (!teamName) {
+        console.error("❌ Error: team name is required\n");
+        console.error("Usage: agent-deploy team download <team-name> [options]");
+        process.exit(1);
+      }
+
+      const outputDir = values.output ? resolve(values.output as string) : resolve("./downloaded-teams");
+
+      console.log(`📥 Downloading team: ${teamName}...\n`);
+
+      const result = await downloadTeam({
+        teamName,
+        outputDir,
+        version: values.version as string | undefined,
+        marketUrl: values.market as string | undefined,
+      });
+
+      console.log("✅ Successfully downloaded team!\n");
+      console.log(`Output: ${result.output_path}`);
+    } catch (error) {
+      handleCommandError(error as Error, "team download");
+    }
+    return;
+  }
+
+  if (action === "list") {
+    try {
+      const { values } = parseArgs({
+        args: args.slice(1),
+        options: {
+          tag: { type: "string" },
+          category: { type: "string" },
+          market: { type: "string" },
+          help: { type: "boolean", short: "h", default: false },
+        },
+        allowPositionals: true,
+      });
+
+      if (values.help) {
+        console.log("List teams from the Market.\n");
+        console.log("Usage: agent-deploy team list [options]");
+        return;
+      }
+
+      console.log("📋 Listing teams...\n");
+
+      const result = await searchTeams({
+        tag: values.tag as string | undefined,
+        category: values.category as string | undefined,
+      }, values.market as string | undefined);
+
+      if (!result.teams || result.teams.length === 0) {
+        console.log("No teams found.");
+        return;
+      }
+
+      const header = ["NAME", "VERSION", "AUTHOR", "CATEGORY", "TAGS", "DOWNLOADS"];
+      const rows = result.teams.map(t => [
+        t.name,
+        t.version,
+        t.author || "-",
+        t.category || "-",
+        (t.tags || []).join(", ") || "-",
+        String(t.downloads || 0),
+      ]);
+
+      printTable(header, rows);
+      console.log(`\nTotal: ${result.total} team(s)`);
+    } catch (error) {
+      handleCommandError(error as Error, "team list");
+    }
+    return;
+  }
+
+  if (action === "validate") {
+    try {
+      const { values, positionals } = parseArgs({
+        args: args.slice(1),
+        options: {
+          help: { type: "boolean", short: "h", default: false },
+        },
+        allowPositionals: true,
+      });
+
+      if (values.help) {
+        console.log("Validate team.json structure.\n");
+        console.log("Usage: agent-deploy team validate <team-dir>");
+        return;
+      }
+
+      const teamDir = positionals[0];
+      if (!teamDir) {
+        console.error("❌ Error: team directory is required\n");
+        console.error("Usage: agent-deploy team validate <team-dir>");
+        process.exit(1);
+      }
+
+      const resolvedPath = resolve(teamDir);
+      if (!existsSync(resolvedPath)) {
+        throw ErrorHandlers.fileNotFound(resolvedPath, 'directory');
+      }
+
+      const teamJsonPath = path.join(resolvedPath, "team.json");
+      if (!existsSync(teamJsonPath)) {
+        console.error(`❌ Error: team.json not found in ${resolvedPath}`);
+        process.exit(1);
+      }
+
+      console.log("🔍 Validating team.json...\n");
+
+      const teamJson = JSON.parse(fs.readFileSync(teamJsonPath, "utf-8"));
+      const errors: string[] = [];
+
+      const identity = teamJson.identity || teamJson;
+      if (!identity.name || typeof identity.name !== "string") {
+        errors.push("Missing required field: identity.name");
+      }
+      if (!identity.version || typeof identity.version !== "string") {
+        errors.push("Missing required field: identity.version");
+      }
+
+      if (errors.length > 0) {
+        console.error("❌ Validation failed:\n");
+        errors.forEach(e => console.error(`  - ${e}`));
+        process.exit(1);
+      }
+
+      console.log("✅ team.json is valid!\n");
+      console.log(`Name:    ${identity.name}`);
+      console.log(`Version: ${identity.version}`);
+      if (identity.display_name) console.log(`Display: ${identity.display_name}`);
+      if (identity.description) console.log(`Desc:    ${identity.description.substring(0, 80)}`);
+      if (identity.author) console.log(`Author:  ${identity.author}`);
+      if (identity.tags && identity.tags.length > 0) {
+        console.log(`Tags:    ${identity.tags.join(", ")}`);
+      }
+    } catch (error) {
+      handleCommandError(error as Error, "team validate");
+    }
+    return;
+  }
+
+  console.error(`❌ Unknown team action: ${action}\n`);
+  console.error("Available actions: package, upload, download, list, validate");
+  console.error("Run 'agent-deploy team help' for more information");
+  process.exit(1);
+}
+
+/**
+ * Handle workflow subcommand
+ */
+async function handleWorkflowCommand(args: string[]) {
+  const action = args[0] || "help";
+
+  if (action === "help" || action === "--help" || action === "-h") {
+    console.log(`
+Usage: agent-deploy workflow <action> [options]
+
+Actions:
+  package <workflow-dir> [-o <dir>]           Package workflow directory into tar.gz
+  upload <workflow-dir> [options]             Upload workflow to Market
+  download <workflow-name> [-o <dir>] [opts]  Download workflow from Market
+  list [options]                              List workflows (search Market)
+  validate <workflow-dir>                     Validate workflow.json structure
+
+Upload Options:
+  --market <url>     Market API URL (default: $MARKET_API_URL or http://localhost:8321)
+  --api-key <key>    API key for authentication (default: $MARKET_API_KEY)
+  --force            Force overwrite existing version
+
+Download Options:
+  -o, --output <dir>  Output directory (default: ./downloaded-workflows)
+  --version <ver>     Specific version to download
+  --market <url>      Market API URL
+
+List Options:
+  --tag <tag>         Filter by tag
+  --category <cat>    Filter by category
+  --market <url>      Market API URL
+
+Examples:
+  agent-deploy workflow package ./my-workflow -o ./dist
+  agent-deploy workflow upload ./my-workflow --market http://localhost:8321 --api-key mykey --force
+  agent-deploy workflow download data-pipeline -o ./output --market http://localhost:8321
+  agent-deploy workflow list --tag automation
+  agent-deploy workflow validate ./my-workflow
+`);
+    return;
+  }
+
+  if (action === "package") {
+    try {
+      const { values, positionals } = parseArgs({
+        args: args.slice(1),
+        options: {
+          output: { type: "string", short: "o" },
+          help: { type: "boolean", short: "h", default: false },
+        },
+        allowPositionals: true,
+      });
+
+      if (values.help) {
+        console.log("Package a workflow directory into a tar.gz archive.\n");
+        console.log("Usage: agent-deploy workflow package <workflow-dir> [-o <dir>]");
+        return;
+      }
+
+      const workflowDir = positionals[0];
+      if (!workflowDir) {
+        console.error("❌ Error: workflow directory is required\n");
+        console.error("Usage: agent-deploy workflow package <workflow-dir> [-o <dir>]");
+        process.exit(1);
+      }
+
+      const resolvedPath = resolve(workflowDir);
+      if (!existsSync(resolvedPath)) {
+        throw ErrorHandlers.fileNotFound(resolvedPath, 'directory');
+      }
+
+      const workflowJsonPath = path.join(resolvedPath, "workflow.json");
+      if (!existsSync(workflowJsonPath)) {
+        console.error(`❌ Error: workflow.json not found in ${resolvedPath}`);
+        process.exit(1);
+      }
+
+      const workflowJson = JSON.parse(fs.readFileSync(workflowJsonPath, "utf-8"));
+      const workflowName = workflowJson.identity?.name || workflowJson.name || path.basename(resolvedPath);
+      const version = workflowJson.identity?.version || workflowJson.version || "0.0.0";
+
+      const outputDir = values.output ? resolve(values.output as string) : resolve("./dist");
+
+      console.log("📦 Packaging workflow...\n");
+      const packagePath = await packDirectoryToTarGz(resolvedPath, outputDir, workflowName, version);
+
+      console.log(`✅ Workflow packaged successfully!\n`);
+      console.log(`Workflow:  ${workflowName} v${version}`);
+      console.log(`Output:    ${packagePath}`);
+    } catch (error) {
+      handleCommandError(error as Error, "workflow package");
+    }
+    return;
+  }
+
+  if (action === "upload") {
+    try {
+      const { values, positionals } = parseArgs({
+        args: args.slice(1),
+        options: {
+          market: { type: "string" },
+          "api-key": { type: "string" },
+          force: { type: "boolean", default: false },
+          help: { type: "boolean", short: "h", default: false },
+        },
+        allowPositionals: true,
+      });
+
+      if (values.help) {
+        console.log("Upload a workflow to the Market.\n");
+        console.log("Usage: agent-deploy workflow upload <workflow-dir> [options]");
+        return;
+      }
+
+      const workflowDir = positionals[0];
+      if (!workflowDir) {
+        console.error("❌ Error: workflow directory is required\n");
+        console.error("Usage: agent-deploy workflow upload <workflow-dir> [options]");
+        process.exit(1);
+      }
+
+      const resolvedPath = resolve(workflowDir);
+      if (!existsSync(resolvedPath)) {
+        throw ErrorHandlers.fileNotFound(resolvedPath, 'directory');
+      }
+
+      console.log("📤 Uploading workflow to Market...\n");
+
+      const result = await uploadWorkflow({
+        workflowDir: resolvedPath,
+        marketUrl: values.market as string | undefined,
+        apiKey: values["api-key"] as string | undefined,
+        force: values.force as boolean,
+      });
+
+      console.log("✅ Successfully uploaded workflow!\n");
+      console.log(`Workflow ID: ${result.workflow_id}`);
+      console.log(`Name:        ${result.workflow_name}`);
+      console.log(`Version:     ${result.version}`);
+      console.log(`Market URL:  ${result.market_url}\n`);
+    } catch (error) {
+      handleCommandError(error as Error, "workflow upload");
+    }
+    return;
+  }
+
+  if (action === "download") {
+    try {
+      const { values, positionals } = parseArgs({
+        args: args.slice(1),
+        options: {
+          output: { type: "string", short: "o" },
+          version: { type: "string" },
+          market: { type: "string" },
+          help: { type: "boolean", short: "h", default: false },
+        },
+        allowPositionals: true,
+      });
+
+      if (values.help) {
+        console.log("Download a workflow from the Market.\n");
+        console.log("Usage: agent-deploy workflow download <workflow-name> [-o <dir>] [options]");
+        return;
+      }
+
+      const workflowName = positionals[0];
+      if (!workflowName) {
+        console.error("❌ Error: workflow name is required\n");
+        console.error("Usage: agent-deploy workflow download <workflow-name> [options]");
+        process.exit(1);
+      }
+
+      const outputDir = values.output ? resolve(values.output as string) : resolve("./downloaded-workflows");
+
+      console.log(`📥 Downloading workflow: ${workflowName}...\n`);
+
+      const result = await downloadWorkflow({
+        workflowName,
+        outputDir,
+        version: values.version as string | undefined,
+        marketUrl: values.market as string | undefined,
+      });
+
+      console.log("✅ Successfully downloaded workflow!\n");
+      console.log(`Output: ${result.output_path}`);
+    } catch (error) {
+      handleCommandError(error as Error, "workflow download");
+    }
+    return;
+  }
+
+  if (action === "list") {
+    try {
+      const { values } = parseArgs({
+        args: args.slice(1),
+        options: {
+          tag: { type: "string" },
+          category: { type: "string" },
+          market: { type: "string" },
+          help: { type: "boolean", short: "h", default: false },
+        },
+        allowPositionals: true,
+      });
+
+      if (values.help) {
+        console.log("List workflows from the Market.\n");
+        console.log("Usage: agent-deploy workflow list [options]");
+        return;
+      }
+
+      console.log("📋 Listing workflows...\n");
+
+      const result = await searchWorkflows({
+        tag: values.tag as string | undefined,
+        category: values.category as string | undefined,
+      }, values.market as string | undefined);
+
+      if (!result.workflows || result.workflows.length === 0) {
+        console.log("No workflows found.");
+        return;
+      }
+
+      const header = ["NAME", "VERSION", "AUTHOR", "CATEGORY", "TAGS", "DOWNLOADS"];
+      const rows = result.workflows.map(w => [
+        w.name,
+        w.version,
+        w.author || "-",
+        w.category || "-",
+        (w.tags || []).join(", ") || "-",
+        String(w.downloads || 0),
+      ]);
+
+      printTable(header, rows);
+      console.log(`\nTotal: ${result.total} workflow(s)`);
+    } catch (error) {
+      handleCommandError(error as Error, "workflow list");
+    }
+    return;
+  }
+
+  if (action === "validate") {
+    try {
+      const { values, positionals } = parseArgs({
+        args: args.slice(1),
+        options: {
+          help: { type: "boolean", short: "h", default: false },
+        },
+        allowPositionals: true,
+      });
+
+      if (values.help) {
+        console.log("Validate workflow.json structure.\n");
+        console.log("Usage: agent-deploy workflow validate <workflow-dir>");
+        return;
+      }
+
+      const workflowDir = positionals[0];
+      if (!workflowDir) {
+        console.error("❌ Error: workflow directory is required\n");
+        console.error("Usage: agent-deploy workflow validate <workflow-dir>");
+        process.exit(1);
+      }
+
+      const resolvedPath = resolve(workflowDir);
+      if (!existsSync(resolvedPath)) {
+        throw ErrorHandlers.fileNotFound(resolvedPath, 'directory');
+      }
+
+      const workflowJsonPath = path.join(resolvedPath, "workflow.json");
+      if (!existsSync(workflowJsonPath)) {
+        console.error(`❌ Error: workflow.json not found in ${resolvedPath}`);
+        process.exit(1);
+      }
+
+      console.log("🔍 Validating workflow.json...\n");
+
+      const workflowJson = JSON.parse(fs.readFileSync(workflowJsonPath, "utf-8"));
+      const errors: string[] = [];
+
+      const identity = workflowJson.identity || workflowJson;
+      if (!identity.name || typeof identity.name !== "string") {
+        errors.push("Missing required field: identity.name");
+      }
+      if (!identity.version || typeof identity.version !== "string") {
+        errors.push("Missing required field: identity.version");
+      }
+
+      if (errors.length > 0) {
+        console.error("❌ Validation failed:\n");
+        errors.forEach(e => console.error(`  - ${e}`));
+        process.exit(1);
+      }
+
+      console.log("✅ workflow.json is valid!\n");
+      console.log(`Name:    ${identity.name}`);
+      console.log(`Version: ${identity.version}`);
+      if (identity.display_name) console.log(`Display: ${identity.display_name}`);
+      if (identity.description) console.log(`Desc:    ${identity.description.substring(0, 80)}`);
+      if (identity.author) console.log(`Author:  ${identity.author}`);
+      if (identity.tags && identity.tags.length > 0) {
+        console.log(`Tags:    ${identity.tags.join(", ")}`);
+      }
+    } catch (error) {
+      handleCommandError(error as Error, "workflow validate");
+    }
+    return;
+  }
+
+  console.error(`❌ Unknown workflow action: ${action}\n`);
+  console.error("Available actions: package, upload, download, list, validate");
+  console.error("Run 'agent-deploy workflow help' for more information");
+  process.exit(1);
+}
+
+/**
+ * Print a simple table to console
+ */
+function printTable(header: string[], rows: string[][]) {
+  const allRows = [header, ...rows];
+  const colWidths = header.map((_, colIdx) =>
+    Math.max(...allRows.map(row => (row[colIdx] || "").length))
+  );
+
+  const formatRow = (row: string[]) =>
+    row.map((cell, i) => (cell || "").padEnd(colWidths[i])).join("  ");
+
+  const separator = colWidths.map(w => "─".repeat(w)).join("  ");
+
+  console.log(formatRow(header));
+  console.log(separator);
+  rows.forEach(row => console.log(formatRow(row)));
+}
+
 // Run CLI
 main().catch((error) => {
   console.error("Fatal error:", error);
   process.exit(1);
 });
+
