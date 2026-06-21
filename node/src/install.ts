@@ -105,12 +105,12 @@ export async function installAgent(
           status: "installed",
         });
         recordDeployment(agentName, version || "unknown", targetTool, absPath, lvl);
-      } catch (err: any) {
+      } catch (err: unknown) {
         entries.push({
           tool: targetTool,
           path: absPath,
           level: lvl,
-          status: `error: ${err.message}`,
+          status: `error: ${(err as Error).message}`,
         });
       }
     }

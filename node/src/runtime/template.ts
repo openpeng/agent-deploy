@@ -9,13 +9,13 @@ export class TemplateResolver {
   /**
    * Resolve template variables in any value
    */
-  resolve(template: any, context: ExecutionContext): any {
+  resolve(template: unknown, context: ExecutionContext): unknown {
     if (typeof template === "string") {
       return this.resolveString(template, context);
     } else if (Array.isArray(template)) {
       return template.map((item) => this.resolve(item, context));
     } else if (typeof template === "object" && template !== null) {
-      const result: any = {};
+      const result: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(template)) {
         result[key] = this.resolve(value, context);
       }
@@ -27,7 +27,7 @@ export class TemplateResolver {
   /**
    * Resolve template variables in a string
    */
-  private resolveString(str: string, context: ExecutionContext): any {
+  private resolveString(str: string, context: ExecutionContext): unknown {
     // Pattern: {{variable}}
     const pattern = /\{\{([^}]+)\}\}/g;
 
@@ -50,13 +50,13 @@ export class TemplateResolver {
    * Resolve a variable path
    *
    * Supported paths:
-   * - {{var}} → context.initialArgs.var
-   * - {{steps.step_name.output}} → context.steps.get('step_name').output
-   * - {{steps.step_name.success}} → context.steps.get('step_name').success
-   * - {{shared_context.key}} → context.sharedContext.key
-   * - {{env.VAR}} → context.env.VAR
+   * - {{var}} -> context.initialArgs.var
+   * - {{steps.step_name.output}} -> context.steps.get('step_name').output
+   * - {{steps.step_name.success}} -> context.steps.get('step_name').success
+   * - {{shared_context.key}} -> context.sharedContext.key
+   * - {{env.VAR}} -> context.env.VAR
    */
-  private resolveVariable(varPath: string, context: ExecutionContext): any {
+  private resolveVariable(varPath: string, context: ExecutionContext): unknown {
     const parts = varPath.split(".");
 
     if (parts[0] === "steps") {
@@ -74,7 +74,7 @@ export class TemplateResolver {
   /**
    * Resolve steps.* path
    */
-  private resolveStepPath(parts: string[], context: ExecutionContext): any {
+  private resolveStepPath(parts: string[], context: ExecutionContext): unknown {
     // {{steps.step_name.output}} or {{steps.step_name.success}}
     if (parts.length < 2) return undefined;
 
@@ -90,7 +90,7 @@ export class TemplateResolver {
 
     // Access specific field
     const field = parts[2];
-    let value: any;
+    let value: unknown;
     switch (field) {
       case "output":
         value = result.output;
@@ -111,7 +111,7 @@ export class TemplateResolver {
     // Support deeper nested access: {{steps.stepname.output.field.subfield}}
     for (let i = 3; i < parts.length && value !== undefined && value !== null; i++) {
       if (typeof value === "object") {
-        value = value[parts[i]];
+        value = (value as Record<string, unknown>)[parts[i]];
       } else {
         return undefined;
       }
@@ -125,7 +125,7 @@ export class TemplateResolver {
   private resolveSharedContextPath(
     parts: string[],
     context: ExecutionContext
-  ): any {
+  ): unknown {
     // {{shared_context.key}}
     if (parts.length < 2) return undefined;
 
@@ -143,7 +143,7 @@ export class TemplateResolver {
   /**
    * Resolve env.* path
    */
-  private resolveEnvPath(parts: string[], context: ExecutionContext): any {
+  private resolveEnvPath(parts: string[], context: ExecutionContext): unknown {
     // {{env.VAR}}
     if (parts.length < 2) return undefined;
     return ExecutionContextManager.getEnv(context, parts[1]);
@@ -155,7 +155,7 @@ export class TemplateResolver {
   private resolveInitialArgsPath(
     parts: string[],
     context: ExecutionContext
-  ): any {
+  ): unknown {
     // {{var}} or {{obj.nested.field}}
     const value = context.initialArgs[parts[0]];
 
@@ -175,13 +175,13 @@ export class TemplateResolver {
   /**
    * Resolve nested path in an object
    */
-  private resolveNestedPath(obj: any, parts: string[]): any {
-    let current = obj;
+  private resolveNestedPath(obj: unknown, parts: string[]): unknown {
+    let current: unknown = obj;
     for (const part of parts) {
       if (current === null || current === undefined) {
         return undefined;
       }
-      current = current[part];
+      current = (current as Record<string, unknown>)[part];
     }
     return current;
   }
@@ -199,7 +199,7 @@ export class TemplateResolver {
   extractVariablePaths(str: string): string[] {
     const pattern = /\{\{([^}]+)\}\}/g;
     const matches: string[] = [];
-    let match;
+    let match: RegExpExecArray | null;
 
     while ((match = pattern.exec(str)) !== null) {
       matches.push(match[1].trim());

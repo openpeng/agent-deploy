@@ -6,7 +6,46 @@ import { ExecutionContext } from "../types.js";
 
 export type LLMProvider = "anthropic" | "openai" | "openai_compatible";
 
-const llmCache = new Map<string, { response: { content: string; model: string; tokens_used: number }; timestamp: number }>();
+interface LLMCacheEntry {
+  response: { content: string; model: string; tokens_used: number };
+  timestamp: number;
+}
+
+interface LLMChatArgs {
+  prompt: string;
+  system_prompt?: string;
+  model?: string;
+  temperature?: number;
+  max_tokens?: number;
+  provider?: LLMProvider;
+  api_key?: string;
+  api_base?: string;
+}
+
+interface LLMChatResult {
+  content: string;
+  model: string;
+  tokens_used: number;
+  duration_ms: number;
+}
+
+interface AnthropicUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+}
+
+interface OpenAIUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+}
+
+interface LLMErrorLike {
+  status?: number;
+  response?: { status?: number };
+  message?: string;
+}
+
+const llmCache = new Map<string, LLMCacheEntry>();
 const CACHE_TTL = 5 * 60 * 1000;
 const FALLBACK_ORDER: LLMProvider[] = ["anthropic", "openai_compatible"];
 
@@ -44,7 +83,7 @@ function resolveModel(provider: LLMProvider, argsModel: string | undefined, env:
   return provider === "anthropic" ? "claude-3-5-sonnet-latest" : "gpt-4o";
 }
 
-function formatLLMError(provider: LLMProvider, model: string, apiBase: string | undefined, error: any): Error {
+function formatLLMError(provider: LLMProvider, model: string, apiBase: string | undefined, error: LLMErrorLike): Error {
   const status = error?.status || error?.response?.status || "unknown";
   const lines = [
     "llm_chat: API call failed",
@@ -62,13 +101,9 @@ export class LLMChatTool implements Tool {
   name = "llm_chat";
 
   async execute(
-    args: {
-      prompt: string; system_prompt?: string; model?: string;
-      temperature?: number; max_tokens?: number;
-      provider?: LLMProvider; api_key?: string; api_base?: string;
-    },
+    args: LLMChatArgs,
     context: ExecutionContext
-  ): Promise<{ content: string; model: string; tokens_used: number; duration_ms: number }> {
+  ): Promise<LLMChatResult> {
     if (!args.prompt) throw new Error("llm_chat: 'prompt' parameter is required");
 
     const temperature = args.temperature !== undefined ? args.temperature : 0.7;
@@ -82,7 +117,7 @@ export class LLMChatTool implements Tool {
       return { ...cached.response, duration_ms: Date.now() - startTime };
     }
 
-    let lastError: any;
+    let lastError: LLMErrorLike | undefined;
     for (const provider of FALLBACK_ORDER) {
       const apiKey = resolveApiKey(provider, args.api_key, context.env);
       if (!apiKey) continue;
@@ -97,42 +132,48 @@ export class LLMChatTool implements Tool {
 
         llmCache.set(cacheKey, { response: result, timestamp: Date.now() });
         return result;
-      } catch (error: any) {
-        lastError = error;
-        const isRetryable = String(error?.status || "").startsWith("5") || (error?.message || "").includes("timeout");
+      } catch (error: unknown) {
+        lastError = error as LLMErrorLike;
+        const isRetryable = String((error as LLMErrorLike)?.status || "").startsWith("5") || ((error as LLMErrorLike)?.message || "").includes("timeout");
         if (isRetryable && provider !== FALLBACK_ORDER[FALLBACK_ORDER.length - 1]) {
           console.log("  \u21B3 llm_chat: '" + provider + "' failed, trying next provider...");
           continue;
         }
-        throw formatLLMError(provider, model, apiBase, error);
+        throw formatLLMError(provider, model, apiBase, error as LLMErrorLike);
       }
     }
     throw formatLLMError(autoDetectProvider(args.provider, context.env), args.model || "unknown", undefined, lastError || new Error("No credentials"));
   }
 
   private async callAnthropic(apiKey: string, prompt: string, sys: string | undefined,
-    model: string, temp: number, maxTok: number, apiBase: string | undefined, startTime: number) {
-    const cfg: any = { anthropicApiKey: apiKey, modelName: model, temperature: temp, maxTokens: maxTok };
+    model: string, temp: number, maxTok: number, apiBase: string | undefined, startTime: number): Promise<LLMChatResult> {
+    const cfg: { anthropicApiKey: string; modelName: string; temperature: number; maxTokens: number; anthropicApiUrl?: string } =
+      { anthropicApiKey: apiKey, modelName: model, temperature: temp, maxTokens: maxTok };
     if (apiBase) cfg.anthropicApiUrl = apiBase;
     const llm = new ChatAnthropic(cfg);
-    const msgs = []; if (sys) msgs.push(new SystemMessage(sys)); msgs.push(new HumanMessage(prompt));
+    const msgs: (SystemMessage | HumanMessage)[] = [];
+    if (sys) msgs.push(new SystemMessage(sys));
+    msgs.push(new HumanMessage(prompt));
     const resp = await llm.invoke(msgs);
     const dur = Date.now() - startTime;
-    const content = typeof resp.content === "string" ? resp.content : (resp.content as any[]).map((c: any) => typeof c === "string" ? c : c.text || "").join("");
-    const usage = resp.response_metadata?.usage as any;
+    const content = typeof resp.content === "string" ? resp.content : (resp.content as Array<{ text?: string } | string>).map((c) => typeof c === "string" ? c : c.text || "").join("");
+    const usage = resp.response_metadata?.usage as AnthropicUsage | undefined;
     return { content, model: (resp.response_metadata?.model as string) || model, tokens_used: usage ? (usage.input_tokens || 0) + (usage.output_tokens || 0) : 0, duration_ms: dur };
   }
 
   private async callOpenAI(apiKey: string, prompt: string, sys: string | undefined,
-    model: string, temp: number, maxTok: number, apiBase: string | undefined, startTime: number) {
-    const cfg: any = { openAIApiKey: apiKey, modelName: model, temperature: temp, maxTokens: maxTok };
+    model: string, temp: number, maxTok: number, apiBase: string | undefined, startTime: number): Promise<LLMChatResult> {
+    const cfg: { openAIApiKey: string; modelName: string; temperature: number; maxTokens: number; configuration?: { baseURL: string } } =
+      { openAIApiKey: apiKey, modelName: model, temperature: temp, maxTokens: maxTok };
     if (apiBase) cfg.configuration = { baseURL: apiBase };
     const llm = new ChatOpenAI(cfg);
-    const msgs = []; if (sys) msgs.push(new SystemMessage(sys)); msgs.push(new HumanMessage(prompt));
+    const msgs: (SystemMessage | HumanMessage)[] = [];
+    if (sys) msgs.push(new SystemMessage(sys));
+    msgs.push(new HumanMessage(prompt));
     const resp = await llm.invoke(msgs);
     const dur = Date.now() - startTime;
-    const content = typeof resp.content === "string" ? resp.content : (resp.content as any[]).map((c: any) => typeof c === "string" ? c : c.text || "").join("");
-    const usage = resp.response_metadata?.tokenUsage as any;
+    const content = typeof resp.content === "string" ? resp.content : (resp.content as Array<{ text?: string } | string>).map((c) => typeof c === "string" ? c : c.text || "").join("");
+    const usage = resp.response_metadata?.tokenUsage as OpenAIUsage | undefined;
     return { content, model: (resp.response_metadata?.model as string) || model, tokens_used: usage ? (usage.promptTokens || 0) + (usage.completionTokens || 0) : 0, duration_ms: dur };
   }
 }

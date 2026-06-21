@@ -22,7 +22,6 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import * as os from "os";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -30,9 +29,9 @@ import * as os from "os";
 
 export interface MemoryEntry {
   key: string;
-  value: any;
+  value: unknown;
   timestamp: number;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface MemoryQuery {
@@ -44,8 +43,8 @@ export interface MemoryQuery {
 }
 
 export interface MemoryStore {
-  set(key: string, value: any, metadata?: Record<string, any>): Promise<void>;
-  get(key: string): Promise<any>;
+  set(key: string, value: unknown, metadata?: Record<string, unknown>): Promise<void>;
+  get(key: string): Promise<unknown>;
   query(query: MemoryQuery): Promise<MemoryEntry[]>;
   delete(key: string): Promise<void>;
   clear(): Promise<void>;
@@ -74,13 +73,13 @@ export class FileMemoryStore implements MemoryStore {
     return path.join(this.memoryDir, key.replace(/[/\\:*?"<>|]/g, "_") + ".json");
   }
 
-  async set(key: string, value: any, metadata?: Record<string, any>): Promise<void> {
+  async set(key: string, value: unknown, metadata?: Record<string, unknown>): Promise<void> {
     this.ensureDir();
     const entry: MemoryEntry = { key, value, timestamp: Date.now(), metadata };
     fs.writeFileSync(this.keyToFile(key), JSON.stringify(entry, null, 2), "utf-8");
   }
 
-  async get(key: string): Promise<any> {
+  async get(key: string): Promise<unknown> {
     const file = this.keyToFile(key);
     if (!fs.existsSync(file)) return undefined;
     const entry: MemoryEntry = JSON.parse(fs.readFileSync(file, "utf-8"));
@@ -113,7 +112,7 @@ export class FileMemoryStore implements MemoryStore {
 
         // Filter by tags (stored in metadata.tags)
         if (query.tags && query.tags.length > 0) {
-          const entryTags: string[] = entry.metadata?.tags || [];
+          const entryTags: string[] = (entry.metadata?.tags as string[]) || [];
           if (!query.tags.every(t => entryTags.includes(t))) continue;
         }
 
@@ -152,6 +151,23 @@ export class FileMemoryStore implements MemoryStore {
 // MemoryTool — single tool exposing all operations
 // ---------------------------------------------------------------------------
 
+export interface MemoryToolArgs {
+  operation: "set" | "get" | "query" | "delete" | "clear";
+  key?: string;
+  value?: unknown;
+  query?: MemoryQuery;
+  metadata?: Record<string, unknown>;
+}
+
+export interface MemoryToolResult {
+  success?: boolean;
+  key?: string;
+  value?: unknown;
+  found?: boolean;
+  results?: MemoryEntry[];
+  count?: number;
+}
+
 export class MemoryTool {
   readonly name = "memory";
   private store: MemoryStore;
@@ -161,15 +177,9 @@ export class MemoryTool {
   }
 
   async execute(
-    args: {
-      operation: "set" | "get" | "query" | "delete" | "clear";
-      key?: string;
-      value?: any;
-      query?: MemoryQuery;
-      metadata?: Record<string, any>;
-    },
-    _context: any
-  ): Promise<any> {
+    args: MemoryToolArgs,
+    _context: unknown
+  ): Promise<MemoryToolResult> {
     switch (args.operation) {
       case "set": {
         if (!args.key || args.value === undefined) {
@@ -202,7 +212,7 @@ export class MemoryTool {
       }
 
       default:
-        throw new Error(`memory: unknown operation '${(args as any).operation}'`);
+        throw new Error(`memory: unknown operation '${(args as MemoryToolArgs).operation}'`);
     }
   }
 }
@@ -211,10 +221,14 @@ export class MemoryTool {
 // Factory helper used by CLI
 // ---------------------------------------------------------------------------
 
+interface ToolRegistryLike {
+  register(tool: { name: string; execute(args: unknown, ctx: unknown): Promise<unknown> }): void;
+}
+
 /**
  * Create and register a MemoryTool bound to the agent's directory.
  */
-export function registerMemoryTool(agentDir: string, registry: any): void {
+export function registerMemoryTool(agentDir: string, registry: ToolRegistryLike): void {
   const store = new FileMemoryStore(agentDir);
   registry.register(new MemoryTool(store));
 }

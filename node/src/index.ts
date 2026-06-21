@@ -8,6 +8,10 @@ import {
   ListToolsRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import { createHttpServer, recordToolCall } from "./http-server.js";
+import { initTelemetry, getTracer, serializeTraceContext, deserializeTraceContext } from "./telemetry.js";
+import { context, SpanStatusCode } from "@opentelemetry/api";
+import { initMetrics, recordRequest } from "./metrics.js";
 import { detectAll, detectPrimary } from "./detect.js";
 import { adaptAgent } from "./adapt.js";
 import { installAgent } from "./install.js";
@@ -16,16 +20,21 @@ import { CursorImportAdapter } from "./adapters/cursor-import.js";
 import { ClaudeImportAdapter } from "./adapters/claude-import.js";
 import { CodeBuddyImportAdapter } from "./adapters/codebuddy-import.js";
 import { GitHubImportAdapter } from "./adapters/github-import.js";
+import { VSCodeImportAdapter } from "./adapters/vscode-import.js";
+import { JetBrainsImportAdapter } from "./adapters/jetbrains-import.js";
+import { OpenAIGPTsImportAdapter } from "./adapters/openai-gpts-import.js";
 import {
   uploadAgent, downloadAgent,
   uploadTeam, downloadTeam, searchTeams, getTeam,
   uploadWorkflow, downloadWorkflow, searchWorkflows, getWorkflow
 } from "./market.js";
-import { AgentExecutor } from "./runtime/agent-executor.js";
+// [DEPRECATED] Runtime imports — preserved for reference, not used in MCP tools
+// import { AgentExecutor } from "./runtime/agent-executor.js";
 import { MarketClient } from "./market.js";
 import { scanDeployedAgents, getDeploymentSummary } from "./scan-deployed.js";
 import { uninstallAgent } from "./uninstall.js";
-import { checkUpdates, getUpdateSummary } from "./check-updates.js";
+import { UpdateChecker, checkUpdates, getUpdateSummary } from "./check-updates.js";
+import { AgentCache } from "./runtime/agent-cache.js";
 
 const SERVER_NAME = "agent-deploy";
 const SERVER_VERSION = "1.0.0";
@@ -67,7 +76,7 @@ const TOOLS: Tool[] = [
   },
   {
     name: "deploy_agent",
-    description: "Full pipeline: detect tools → download agent → adapt → install in one call.",
+    description: "Full pipeline: detect tools → download agent → adapt → install in one call. Uses cache by default; set refresh=true to force re-download.",
     inputSchema: {
       type: "object",
       properties: {
@@ -75,6 +84,7 @@ const TOOLS: Tool[] = [
         target_tool: { type: "string", description: "Target tool ID, 'auto' for auto-detect, 'all' for all detected", default: "auto" },
         target_file: { type: "string", description: "Required. Target file path (relative)." },
         level: { type: "string", description: "Install level", default: "both" },
+        refresh: { type: "boolean", description: "Force skip cache and re-download from Market (default: false)" },
       },
       required: ["agent_path", "target_file"],
     },
@@ -106,29 +116,31 @@ const TOOLS: Tool[] = [
   },
   {
     name: "check_updates",
-    description: "Check for updates to deployed agents.",
+    description: "Check for updates to deployed agents. Returns detailed update info including version comparison, update level (major/minor/patch), release date and changelog.",
     inputSchema: {
       type: "object",
       properties: {
-        market_url: { type: "string" },
+        market_url: { type: "string", description: "Market API URL (default: $MARKET_API_URL or http://localhost:8321)" },
+        include_local: { type: "boolean", description: "Also check local agents not tracked in deployment state (default: false)" },
+        agent_id: { type: "string", description: "Check a specific agent by ID (optional, checks all if omitted)" },
       },
       required: [],
     },
   },
   {
     name: "import_agent",
-    description: "Import an agent from an AI tool format (Cursor, Claude Code, CodeBuddy, GitHub) to agent.json v2.0 format.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        source_path: { type: "string", description: "Path to the agent file or directory (e.g., .cursor/commands/my-agent.md)" },
-        output_dir: { type: "string", description: "Output directory for agent.json (default: ./imported-agents)" },
-        tool: { type: "string", description: "Force specific tool adapter: cursor, claude_code, codebuddy, github_copilot (auto-detect if omitted)" },
-        dry_run: { type: "boolean", description: "Preview import without writing files (default: false)" },
+    description: "Import an agent from an AI tool format (Cursor, Claude Code, CodeBuddy, GitHub, VSCode, JetBrains, OpenAI GPTs) to agent.json v2.0 format.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          source_path: { type: "string", description: "Path to the agent file or directory (e.g., .cursor/commands/my-agent.md)" },
+          output_dir: { type: "string", description: "Output directory for agent.json (default: ./imported-agents)" },
+          tool: { type: "string", description: "Force specific tool adapter: cursor, claude_code, codebuddy, github_copilot, vscode, jetbrains, openai_gpts (auto-detect if omitted)" },
+          dry_run: { type: "boolean", description: "Preview import without writing files (default: false)" },
+        },
+        required: ["source_path"],
       },
-      required: ["source_path"],
     },
-  },
   {
     name: "upload_agent",
     description: "Upload an agent to the Market for sharing and distribution. Requires a valid API key.",
@@ -145,53 +157,57 @@ const TOOLS: Tool[] = [
   },
   {
     name: "download_agent",
-    description: "Download an agent from the Market by ID.",
+    description: "Download an agent from the Market by ID. Returns from cache if available.",
     inputSchema: {
       type: "object",
       properties: {
         agent_id: { type: "string", description: "Agent ID to download from Market" },
         output_dir: { type: "string", description: "Output directory (default: ./downloaded-agents)" },
         market_url: { type: "string", description: "Market API URL (default: $MARKET_API_URL or http://localhost:8321)" },
+        version: { type: "string", description: "Specific version to download (default: latest)" },
+        skip_cache: { type: "boolean", description: "Force skip cache and re-download (default: false)" },
       },
       required: ["agent_id"],
     },
   },
   {
     name: "list_agents",
-    description: "List available agents — local agents and optionally market agents.",
+    description: "List available agents — local agents, market agents, and cache status with update hints.",
     inputSchema: {
       type: "object",
       properties: {
         include_market: { type: "boolean", description: "Include market agents (default: true)" },
         include_deployed: { type: "boolean", description: "Include deployed agents (default: true)", default: true },
+        include_cache: { type: "boolean", description: "Include cache status (default: true)", default: true },
       },
     },
   },
-  {
-    name: "execute_agent",
-    description: "Execute an agent with full support for dynamic overrides. Customize context, inject skills, and mount MCP servers at runtime.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        agent: { type: "string", description: "Agent identifier — name, path, or market://name@version" },
-        input: { type: "object", description: "Input arguments passed to the agent" },
-        overrides: {
-          type: "object",
-          description: "Dynamic overrides",
-          properties: {
-            instructions: { type: "string", description: "Override agent instructions" },
-            skills: { type: "array", description: "Skill definitions to inject" },
-            mcp_servers: { type: "object", description: "MCP server configs to mount" },
-            shared_context: { type: "object", description: "Shared context values" },
-            trusted: { type: "boolean", description: "Trusted mode" },
-            cwd: { type: "string", description: "Working directory" },
-            env: { type: "object", description: "Environment variables" },
-          },
-        },
-      },
-      required: ["agent"],
-    },
-  },
+  // [DEPRECATED] execute_agent tool — moved to agent-compose Runtime Engine
+  // {
+  //   name: "execute_agent",
+  //   description: "Execute an agent with full support for dynamic overrides. Customize context, inject skills, and mount MCP servers at runtime.",
+  //   inputSchema: {
+  //     type: "object",
+  //     properties: {
+  //       agent: { type: "string", description: "Agent identifier — name, path, or market://name@version" },
+  //       input: { type: "object", description: "Input arguments passed to the agent" },
+  //       overrides: {
+  //         type: "object",
+  //         description: "Dynamic overrides",
+  //         properties: {
+  //           instructions: { type: "string", description: "Override agent instructions" },
+  //           skills: { type: "array", description: "Skill definitions to inject" },
+  //           mcp_servers: { type: "object", description: "MCP server configs to mount" },
+  //           shared_context: { type: "object", description: "Shared context values" },
+  //           trusted: { type: "boolean", description: "Trusted mode" },
+  //           cwd: { type: "string", description: "Working directory" },
+  //           env: { type: "object", description: "Environment variables" },
+  //         },
+  //       },
+  //     },
+  //     required: ["agent"],
+  //   },
+  // },
   {
     name: "upload_team",
     description: "Upload a Team package to the Market. Requires a valid API key.",
@@ -411,6 +427,9 @@ async function handleImportAgent(args: Record<string, unknown>): Promise<string>
   manager.registerAdapter(new ClaudeImportAdapter());
   manager.registerAdapter(new CodeBuddyImportAdapter());
   manager.registerAdapter(new GitHubImportAdapter());
+  manager.registerAdapter(new VSCodeImportAdapter());
+  manager.registerAdapter(new JetBrainsImportAdapter());
+  manager.registerAdapter(new OpenAIGPTsImportAdapter());
 
   try {
     if (dryRun) {
@@ -487,6 +506,8 @@ async function handleDownloadAgent(args: Record<string, unknown>): Promise<strin
   const agentId = args.agent_id as string;
   const outputDir = args.output_dir as string | undefined || "./downloaded-agents";
   const marketUrl = args.market_url as string | undefined;
+  const version = args.version as string | undefined;
+  const skipCache = (args.skip_cache as boolean) ?? false;
 
   if (!agentId) {
     throw new Error("agent_id is required");
@@ -497,13 +518,18 @@ async function handleDownloadAgent(args: Record<string, unknown>): Promise<strin
       agentId,
       outputDir,
       marketUrl,
+      version,
+      skipCache,
     });
 
     return JSON.stringify({
       status: "success",
       agent_id: result.agent_id,
       output_path: result.output_path,
-      message: `✅ Successfully downloaded agent to: ${result.output_path}\n\nYou can now:\n1. Review the agent.json\n2. Deploy it to AI tools with deploy_agent`,
+      from_cache: result.fromCache ?? false,
+      message: result.fromCache
+        ? `✅ Agent loaded from cache: ${result.output_path}`
+        : `✅ Successfully downloaded agent to: ${result.output_path}\n\nYou can now:\n1. Review the agent.json\n2. Deploy it to AI tools with deploy_agent`,
     }, null, 2);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -512,12 +538,22 @@ async function handleDownloadAgent(args: Record<string, unknown>): Promise<strin
 }
 
 /**
- * list_agents — list available agents (local + market)
+ * list_agents — list available agents (local + market + cache + update hints)
  */
 async function handleListAgents(args: Record<string, unknown>): Promise<string> {
   const includeMarket = args.include_market !== false; // default true
   const includeDeployed = args.include_deployed !== false; // default true
-  const agents: Array<{ name: string; source: string; path?: string }> = [];
+  const includeCache = args.include_cache !== false; // default true
+  const agents: Array<{
+    name: string;
+    source: string;
+    path?: string;
+    version?: string;
+    cached?: boolean;
+    cached_versions?: string[];
+    update_available?: boolean;
+    latest_version?: string;
+  }> = [];
 
   // Scan local agents directory
   const agentsDir = path.join(process.cwd(), 'agents');
@@ -527,7 +563,12 @@ async function handleListAgents(args: Record<string, unknown>): Promise<string> 
         if (entry.isDirectory()) {
           const agentJsonPath = path.join(agentsDir, entry.name, 'agent.json');
           if (fs.existsSync(agentJsonPath)) {
-            agents.push({ name: entry.name, source: 'local', path: path.join(agentsDir, entry.name) });
+            let version: string | undefined;
+            try {
+              const aj = JSON.parse(fs.readFileSync(agentJsonPath, 'utf-8'));
+              version = aj.identity?.version || aj.version;
+            } catch { /* ignore */ }
+            agents.push({ name: entry.name, source: 'local', path: path.join(agentsDir, entry.name), version });
           }
         }
       }
@@ -545,7 +586,12 @@ async function handleListAgents(args: Record<string, unknown>): Promise<string> 
           if (fs.existsSync(agentJsonPath)) {
             const exists = agents.some(a => a.name === entry.name);
             if (!exists) {
-              agents.push({ name: entry.name, source: 'local', path: path.join(parentDir, entry.name) });
+              let version: string | undefined;
+              try {
+                const aj = JSON.parse(fs.readFileSync(agentJsonPath, 'utf-8'));
+                version = aj.identity?.version || aj.version;
+              } catch { /* ignore */ }
+              agents.push({ name: entry.name, source: 'local', path: path.join(parentDir, entry.name), version });
             }
           }
         }
@@ -565,7 +611,7 @@ async function handleListAgents(args: Record<string, unknown>): Promise<string> 
         for (const agent of result.agents) {
           const name = agent.name || agent.id;
           if (name && !agents.some(a => a.name === name)) {
-            agents.push({ name, source: 'market', path: 'market://' + name });
+            agents.push({ name, source: 'market', path: 'market://' + name, version: agent.version });
           }
         }
       }
@@ -580,7 +626,7 @@ async function handleListAgents(args: Record<string, unknown>): Promise<string> 
       const deployed = scanDeployedAgents();
       for (const d of deployed) {
         if (!agents.some(a => a.name === d.name)) {
-          agents.push({ name: d.name, source: 'deployed', path: d.path });
+          agents.push({ name: d.name, source: 'deployed', path: d.path, version: d.version });
         }
       }
     } catch (err) {
@@ -588,28 +634,51 @@ async function handleListAgents(args: Record<string, unknown>): Promise<string> 
     }
   }
 
+  // Cache status & update hints
+  if (includeCache) {
+    const cache = new AgentCache();
+    const checker = new UpdateChecker();
+    for (const agent of agents) {
+      const cachedVersions = cache.getVersions(agent.name);
+      if (cachedVersions.length > 0) {
+        agent.cached = true;
+        agent.cached_versions = cachedVersions;
+      }
+      // Async update check (best effort)
+      try {
+        const updateInfo = await checker.checkAgent(agent.name, agent.version);
+        if (updateInfo?.isUpdateAvailable) {
+          agent.update_available = true;
+          agent.latest_version = updateInfo.latestVersion;
+        }
+      } catch {
+        // ignore update check failures
+      }
+    }
+  }
+
   return JSON.stringify({ total: agents.length, agents }, null, 2);
 }
 
 /**
- * execute_agent — execute an agent with full override support
+ * [DEPRECATED] execute_agent — moved to agent-compose Runtime Engine
  */
-async function handleExecuteAgent(args: Record<string, unknown>): Promise<string> {
-  const agent = args.agent as string;
-  if (!agent) throw new Error('agent parameter is required');
-
-  const input = (args.input as Record<string, any>) || {};
-  const overrides = (args.overrides as any) || {};
-
-  const result = await AgentExecutor.execute({
-    agent,
-    input,
-    overrides,
-    verbose: false,
-  });
-
-  return JSON.stringify(result, null, 2);
-}
+// async function handleExecuteAgent(args: Record<string, unknown>): Promise<string> {
+//   const agent = args.agent as string;
+//   if (!agent) throw new Error('agent parameter is required');
+//
+//   const input = (args.input as Record<string, any>) || {};
+//   const overrides = (args.overrides as any) || {};
+//
+//   const result = await AgentExecutor.execute({
+//     agent,
+//     input,
+//     overrides,
+//     verbose: false,
+//   });
+//
+//   return JSON.stringify(result, null, 2);
+// }
 
 async function handleScanDeployed(args: Record<string, unknown>): Promise<string> {
   const workspaceRoot = args.workspace_root as string | undefined;
@@ -632,9 +701,42 @@ async function handleUninstallAgent(args: Record<string, unknown>): Promise<stri
 
 async function handleCheckUpdates(args: Record<string, unknown>): Promise<string> {
   const marketUrl = args.market_url as string | undefined;
-  const updates = await checkUpdates(marketUrl);
-  const summary = getUpdateSummary(updates);
-  return JSON.stringify({ total: updates.length, updates, summary }, null, 2);
+  const includeLocal = (args.include_local as boolean) ?? false;
+  const agentId = args.agent_id as string | undefined;
+
+  const checker = new UpdateChecker({ marketUrl, includeLocalAgents: includeLocal });
+
+  let updates;
+  if (agentId) {
+    const info = await checker.checkAgent(agentId);
+    updates = [info];
+  } else {
+    updates = await checker.checkAll();
+  }
+
+  const summary = checker["summarizeUpdates"](updates);
+
+  return JSON.stringify({
+    total: updates.length,
+    updates: updates.map(u => ({
+      agent_id: u.agentId,
+      current_version: u.currentVersion,
+      latest_version: u.latestVersion,
+      is_update_available: u.isUpdateAvailable,
+      update_level: u.updateLevel,
+      release_date: u.releaseDate,
+      changelog: u.changelog,
+      market_id: u.marketId,
+      error: u.error,
+    })),
+    summary: {
+      total: summary.total,
+      up_to_date: summary.upToDate,
+      has_updates: summary.hasUpdates,
+      check_failed: summary.checkFailed,
+      updates_by_level: summary.updatesByLevel,
+    },
+  }, null, 2);
 }
 
 async function handleUploadTeam(args: Record<string, unknown>): Promise<string> {
@@ -738,7 +840,7 @@ async function handleGetTeam(args: Record<string, unknown>): Promise<string> {
   }
 
   try {
-    const team = await getTeam({ teamId, marketUrl });
+    const team = await getTeam(teamId, marketUrl);
     return JSON.stringify({ status: "success", team }, null, 2);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -875,7 +977,6 @@ async function handleListWorkflows(args: Record<string, unknown>): Promise<strin
         description: w.description,
         category: w.category,
         tags: w.tags,
-        steps_count: w.steps_count,
       })),
     }, null, 2);
   } catch (error) {
@@ -893,7 +994,7 @@ async function handleGetWorkflow(args: Record<string, unknown>): Promise<string>
   }
 
   try {
-    const workflow = await getWorkflow({ workflowId, marketUrl });
+    const workflow = await getWorkflow(workflowId, marketUrl);
     return JSON.stringify({ status: "success", workflow }, null, 2);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -949,49 +1050,112 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+const tracer = getTracer("agent-deploy-mcp");
+
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return tracer.startActiveSpan("mcp.list_tools", async (span) => {
+    span.setAttribute("mcp.server_name", SERVER_NAME);
+    span.end();
+    return { tools: TOOLS };
+  });
+});
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-  try {
-    let result: string;
-    switch (name) {
-      case "list_installed_tools": result = await handleListTools(); break;
-      case "adapt_agent": result = await handleAdaptAgent(args ?? {}); break;
-      case "install_agent": result = await handleInstallAgent(args ?? {}); break;
-      case "deploy_agent": result = await handleDeployAgent(args ?? {}); break;
-      case "import_agent": result = await handleImportAgent(args ?? {}); break;
-      case "upload_agent": result = await handleUploadAgent(args ?? {}); break;
-      case "download_agent": result = await handleDownloadAgent(args ?? {}); break;
-      case "list_agents": result = await handleListAgents(args ?? {}); break;
-      case "execute_agent": result = await handleExecuteAgent(args ?? {}); break;
-      case "scan_deployed": result = await handleScanDeployed(args ?? {}); break;
-      case "uninstall_agent": result = await handleUninstallAgent(args ?? {}); break;
-      case "check_updates": result = await handleCheckUpdates(args ?? {}); break;
-      case "upload_team": result = await handleUploadTeam(args ?? {}); break;
-      case "download_team": result = await handleDownloadTeam(args ?? {}); break;
-      case "list_teams": result = await handleListTeams(args ?? {}); break;
-      case "get_team": result = await handleGetTeam(args ?? {}); break;
-      case "validate_team": result = await handleValidateTeam(args ?? {}); break;
-      case "upload_workflow": result = await handleUploadWorkflow(args ?? {}); break;
-      case "download_workflow": result = await handleDownloadWorkflow(args ?? {}); break;
-      case "list_workflows": result = await handleListWorkflows(args ?? {}); break;
-      case "get_workflow": result = await handleGetWorkflow(args ?? {}); break;
-      case "validate_workflow": result = await handleValidateWorkflow(args ?? {}); break;
-      default: throw new Error(`Unknown tool: ${name}`);
+  const start = Date.now();
+
+  return tracer.startActiveSpan(`mcp.tool.${name}`, async (span) => {
+    span.setAttribute("mcp.tool_name", name);
+    span.setAttribute("mcp.transport", process.env.TRANSPORT || "stdio");
+    // Record arguments summary (keys only, no sensitive values)
+    if (args && typeof args === "object") {
+      span.setAttribute("mcp.tool_args_keys", Object.keys(args).join(","));
     }
-    return { content: [{ type: "text", text: result }] };
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    return { content: [{ type: "text", text: JSON.stringify({ error: msg }) }], isError: true };
-  }
+
+    try {
+      let result: string;
+      switch (name) {
+        case "list_installed_tools": result = await handleListTools(); break;
+        case "adapt_agent": result = await handleAdaptAgent(args ?? {}); break;
+        case "install_agent": result = await handleInstallAgent(args ?? {}); break;
+        case "deploy_agent": result = await handleDeployAgent(args ?? {}); break;
+        case "import_agent": result = await handleImportAgent(args ?? {}); break;
+        case "upload_agent": result = await handleUploadAgent(args ?? {}); break;
+        case "download_agent": result = await handleDownloadAgent(args ?? {}); break;
+        case "list_agents": result = await handleListAgents(args ?? {}); break;
+        // [DEPRECATED] execute_agent — moved to agent-compose
+        // case "execute_agent": result = await handleExecuteAgent(args ?? {}); break;
+        case "scan_deployed": result = await handleScanDeployed(args ?? {}); break;
+        case "uninstall_agent": result = await handleUninstallAgent(args ?? {}); break;
+        case "check_updates": result = await handleCheckUpdates(args ?? {}); break;
+        case "upload_team": result = await handleUploadTeam(args ?? {}); break;
+        case "download_team": result = await handleDownloadTeam(args ?? {}); break;
+        case "list_teams": result = await handleListTeams(args ?? {}); break;
+        case "get_team": result = await handleGetTeam(args ?? {}); break;
+        case "validate_team": result = await handleValidateTeam(args ?? {}); break;
+        case "upload_workflow": result = await handleUploadWorkflow(args ?? {}); break;
+        case "download_workflow": result = await handleDownloadWorkflow(args ?? {}); break;
+        case "list_workflows": result = await handleListWorkflows(args ?? {}); break;
+        case "get_workflow": result = await handleGetWorkflow(args ?? {}); break;
+        case "validate_workflow": result = await handleValidateWorkflow(args ?? {}); break;
+        default: throw new Error(`Unknown tool: ${name}`);
+      }
+      recordToolCall();
+      recordRequest(name, "success", Date.now() - start);
+      span.setStatus({ code: SpanStatusCode.OK });
+      span.setAttribute("mcp.duration_ms", Date.now() - start);
+      if (process.env.DEBUG) {
+        console.error(`[Tool] ${name} completed in ${Date.now() - start}ms`);
+      }
+      return { content: [{ type: "text", text: result }] };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      recordRequest(name, "error", Date.now() - start);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: msg });
+      span.recordException(error as Error);
+      span.setAttribute("mcp.duration_ms", Date.now() - start);
+      return { content: [{ type: "text", text: JSON.stringify({ error: msg }) }], isError: true };
+    } finally {
+      span.end();
+    }
+  });
 });
 
 // ---- Run ----
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error(`${SERVER_NAME} v${SERVER_VERSION} running on stdio`);
+  initTelemetry({ debug: !!process.env.DEBUG });
+  initMetrics();
+
+  const transportMode = process.env.TRANSPORT || "stdio";
+
+  return tracer.startActiveSpan("mcp.server.startup", async (span) => {
+    span.setAttribute("mcp.server_name", SERVER_NAME);
+    span.setAttribute("mcp.server_version", SERVER_VERSION);
+    span.setAttribute("mcp.transport", transportMode);
+
+    try {
+      if (transportMode === "http") {
+        const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+        createHttpServer({
+          port,
+          version: SERVER_VERSION,
+          serverFactory: () => server,
+        });
+        console.error(`${SERVER_NAME} v${SERVER_VERSION} running on HTTP (port ${port})`);
+      } else {
+        const transport = new StdioServerTransport();
+        await server.connect(transport);
+        console.error(`${SERVER_NAME} v${SERVER_VERSION} running on stdio`);
+      }
+      span.setStatus({ code: SpanStatusCode.OK });
+    } catch (err) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+      span.recordException(err as Error);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
 }
 
 main().catch((err) => {

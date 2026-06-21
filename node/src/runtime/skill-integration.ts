@@ -40,8 +40,16 @@ export interface SkillDefinition {
   name: string;
   description: string;
   entry_point: string;
-  parameters?: Record<string, any>;
+  parameters?: Record<string, unknown>;
   workerYaml: WorkerYaml;
+}
+
+interface ParsedSkillYaml {
+  tools?: unknown[];
+  shared_context?: Record<string, unknown>;
+  pipeline: unknown[];
+  description?: string;
+  parameters?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -58,7 +66,7 @@ export class SkillTool {
     this.name = skill.name;
   }
 
-  async execute(args: Record<string, any>, context: ExecutionContext): Promise<any> {
+  async execute(args: Record<string, unknown>, context: ExecutionContext): Promise<unknown> {
     // Build an isolated registry with builtin tools (skills cannot use other skills)
     const registry = new ToolRegistry();
     registry.register(new ReadFileTool());
@@ -74,7 +82,7 @@ export class SkillTool {
       agent: context.agent,
       initialArgs: args,
       cwd: context.cwd,
-      env: context.env as Record<string, string>,
+      env: context.env,
       sharedContext: { ...context.sharedContext },
     });
 
@@ -86,6 +94,10 @@ export class SkillTool {
 // ---------------------------------------------------------------------------
 // SkillLoader
 // ---------------------------------------------------------------------------
+
+interface ToolRegistryLike {
+  register(tool: { name: string; execute(args: unknown, ctx: unknown): Promise<unknown> }): void;
+}
 
 export class SkillLoader {
   /**
@@ -102,9 +114,9 @@ export class SkillLoader {
       if (!file.endsWith(".yaml") && !file.endsWith(".yml")) continue;
       const filePath = path.join(skillsDir, file);
 
-      let parsed: any;
+      let parsed: ParsedSkillYaml | null = null;
       try {
-        parsed = yaml.load(fs.readFileSync(filePath, "utf-8"));
+        parsed = yaml.load(fs.readFileSync(filePath, "utf-8")) as ParsedSkillYaml | null;
       } catch (e) {
         console.warn(`[WARN] Failed to parse skill file ${filePath}: ${(e as Error).message}`);
         continue;
@@ -116,10 +128,54 @@ export class SkillLoader {
       }
 
       const name = path.basename(file, path.extname(file));
+      interface ParsedToolEntry {
+        name: string;
+        type: string;
+        subagent?: string;
+        server?: string;
+        skill_name?: string;
+      }
+      interface ParsedPipelineEntry {
+        step: string;
+        tool?: string;
+        args?: Record<string, unknown>;
+        output?: string;
+        when?: string;
+        on_fail?: unknown;
+        timeout_ms?: number;
+        invoke?: string;
+        with?: Record<string, unknown>;
+        invoke_parallel?: unknown;
+        as?: Record<string, string>;
+      }
       const workerYaml: WorkerYaml = {
-        tools: parsed.tools || [],
+        tools: (parsed.tools || []).map((t) => {
+          const entry = t as ParsedToolEntry;
+          return {
+            name: entry.name,
+            type: entry.type as import("./types.js").ToolType,
+            subagent: entry.subagent,
+            server: entry.server,
+            skill_name: entry.skill_name,
+          };
+        }),
         shared_context: parsed.shared_context || {},
-        pipeline: parsed.pipeline,
+        pipeline: parsed.pipeline.map((s) => {
+          const entry = s as ParsedPipelineEntry;
+          return {
+            step: entry.step,
+            tool: entry.tool,
+            args: entry.args,
+            output: entry.output,
+            when: entry.when,
+            on_fail: entry.on_fail as import("./types.js").OnFailStrategy | undefined,
+            timeout_ms: entry.timeout_ms,
+            invoke: entry.invoke,
+            with: entry.with,
+            invoke_parallel: entry.invoke_parallel as Array<{ agent: string; with?: Record<string, unknown> }> | undefined,
+            as: entry.as,
+          };
+        }),
       };
 
       skills.push({
@@ -138,7 +194,7 @@ export class SkillLoader {
    * Register all skills from the agent directory into the provided ToolRegistry.
    * Returns the number of skills registered.
    */
-  registerSkills(agentDir: string, registry: any): number {
+  registerSkills(agentDir: string, registry: ToolRegistryLike): number {
     const skills = this.loadSkills(agentDir);
     for (const skill of skills) {
       registry.register(new SkillTool(skill, agentDir));
@@ -157,7 +213,7 @@ export class SkillLoader {
    * @param registry  - Target ToolRegistry to register skills into
    * @returns         - Number of skills registered
    */
-  registerFromDefs(skillDefs: SkillDefinition[], registry: any): number {
+  registerFromDefs(skillDefs: SkillDefinition[], registry: ToolRegistryLike): number {
     let count = 0;
     // agentDir is required for SkillTool constructor but is not used for execution
     // when skills come from runtime overrides rather than a directory

@@ -28,16 +28,14 @@ export class WorkerYamlParser {
    * Parse worker.yaml from string content
    */
   parseString(content: string, sourcePath?: string): WorkerYaml {
-    let parsed: any;
+    let parsed: unknown;
 
     try {
       parsed = yaml.load(content);
-    } catch (error) {
-      const err = error as Error;
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
       throw new Error(
-        `Failed to parse YAML${sourcePath ? ` in ${sourcePath}` : ""}: ${
-          err.message
-        }`
+        `Failed to parse YAML${sourcePath ? ` in ${sourcePath}` : ""}: ${err.message}`
       );
     }
 
@@ -46,10 +44,11 @@ export class WorkerYamlParser {
     }
 
     // Validate and construct WorkerYaml
+    const p = parsed as Record<string, any>;
     const workerYaml: WorkerYaml = {
-      tools: this.parseTools(parsed.tools),
-      shared_context: parsed.shared_context || {},
-      pipeline: this.parsePipeline(parsed.pipeline),
+      tools: this.parseTools(p.tools),
+      shared_context: p.shared_context || {},
+      pipeline: this.parsePipeline(p.pipeline),
     };
 
     return workerYaml;
@@ -171,7 +170,7 @@ export class WorkerYamlParser {
     };
   }
 
-  private parseTools(tools: any): ToolDefinition[] {
+  private parseTools(tools: unknown): ToolDefinition[] {
     if (!Array.isArray(tools)) {
       throw new Error("'tools' must be an array");
     }
@@ -181,29 +180,31 @@ export class WorkerYamlParser {
         throw new Error(`Tool at index ${index} must be an object`);
       }
 
-      if (!tool.name || typeof tool.name !== "string") {
+      const t = tool as Record<string, unknown>;
+
+      if (!t.name || typeof t.name !== "string") {
         throw new Error(
           `Tool at index ${index} is missing 'name' field (string)`
         );
       }
 
-      if (!tool.type || typeof tool.type !== "string") {
+      if (!t.type || typeof t.type !== "string") {
         throw new Error(
-          `Tool '${tool.name}' is missing 'type' field (string)`
+          `Tool '${t.name}' is missing 'type' field (string)`
         );
       }
 
       return {
-        name: tool.name,
-        type: tool.type,
-        subagent: tool.subagent,
-        server: tool.server,
-        skill_name: tool.skill_name,
+        name: t.name,
+        type: t.type as import("./types.js").ToolType,
+        subagent: typeof t.subagent === "string" ? t.subagent : undefined,
+        server: typeof t.server === "string" ? t.server : undefined,
+        skill_name: typeof t.skill_name === "string" ? t.skill_name : undefined,
       };
     });
   }
 
-  private parsePipeline(pipeline: any): PipelineStep[] {
+  private parsePipeline(pipeline: unknown): PipelineStep[] {
     if (!Array.isArray(pipeline)) {
       throw new Error("'pipeline' must be an array");
     }
@@ -213,25 +214,27 @@ export class WorkerYamlParser {
         throw new Error(`Pipeline step at index ${index} must be an object`);
       }
 
-      if (!step.step || typeof step.step !== "string") {
+      const s = step as Record<string, unknown>;
+
+      if (!s.step || typeof s.step !== "string") {
         throw new Error(
           `Pipeline step at index ${index} is missing 'step' field (string)`
         );
       }
 
-      if (!step.tool || typeof step.tool !== "string") {
+      if (!s.tool || typeof s.tool !== "string") {
         throw new Error(
-          `Step '${step.step}' is missing 'tool' field (string)`
+          `Step '${s.step}' is missing 'tool' field (string)`
         );
       }
 
       return {
-        step: step.step,
-        tool: step.tool,
-        args: step.args,
-        output: step.output,
-        when: step.when,
-        on_fail: step.on_fail,
+        step: s.step,
+        tool: s.tool,
+        args: s.args as Record<string, unknown> | undefined,
+        output: typeof s.output === "string" ? s.output : undefined,
+        when: typeof s.when === "string" ? s.when : undefined,
+        on_fail: s.on_fail as PipelineStep["on_fail"],
       };
     });
   }

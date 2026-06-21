@@ -31,31 +31,38 @@ import {
   getWorkflow,
   packDirectoryToTarGz,
 } from "./market.js";
+import { UpdateChecker } from "./check-updates.js";
+import { AgentCache } from "./runtime/agent-cache.js";
 import { adaptAgent } from "./adapt.js";
 import { installAgent } from "./install.js";
 import { detectAll } from "./detect.js";
 import { ErrorHandlers, handleCommandError, UserFriendlyError } from "./errors.js";
 import { listTemplates, getTemplate, initFromTemplate } from "./templates.js";
-import { PipelineEngine, ConsoleLogger } from "./runtime/pipeline.js";
-import { AgentExecutor } from "./runtime/agent-executor.js";
-import { ToolRegistry } from "./runtime/tool-registry.js";
-import { ExecutionContextManager } from "./runtime/context.js";
-import { WorkerYaml } from "./runtime/types.js";
-import { ReadFileTool } from "./runtime/tools/read-file.js";
-import { WriteFileTool } from "./runtime/tools/write-file.js";
-import { BashTool } from "./runtime/tools/bash.js";
-import { GlobTool } from "./runtime/tools/glob.js";
-import { LLMChatTool } from "./runtime/tools/llm-chat.js";
-import { WebFetchTool } from "./runtime/tools/web-fetch.js";
-import { WebSearchTool } from "./runtime/tools/web-search.js";
-import { invokeAgentTool } from "./runtime/builtin-tools/invoke-agent.js";
-import { listAgentsTool } from "./runtime/builtin-tools/list-agents.js";
-import { V2CompatibilityLayer } from "./runtime/v2-compat.js";
-import { getPolicyRegistry } from "./runtime/policy.js";
-import { MCPToolLoader } from "./runtime/mcp-integration.js";
-import { SkillLoader } from "./runtime/skill-integration.js";
-import { registerMemoryTool } from "./runtime/memory-integration.js";
+// [DEPRECATED] Runtime imports — preserved for reference, not used in CLI
+// These modules are being migrated to agent-compose (Runtime Engine).
+// import { PipelineEngine, ConsoleLogger } from "./runtime/pipeline.js";
+// import { AgentExecutor } from "./runtime/agent-executor.js";
+// import { ToolRegistry } from "./runtime/tool-registry.js";
+// import { ExecutionContextManager } from "./runtime/context.js";
+// import { WorkerYaml } from "./runtime/types.js";
+// import { ReadFileTool } from "./runtime/tools/read-file.js";
+// import { WriteFileTool } from "./runtime/tools/write-file.js";
+// import { BashTool } from "./runtime/tools/bash.js";
+// import { GlobTool } from "./runtime/tools/glob.js";
+// import { LLMChatTool } from "./runtime/tools/llm-chat.js";
+// import { WebFetchTool } from "./runtime/tools/web-fetch.js";
+// import { WebSearchTool } from "./runtime/tools/web-search.js";
+// import { invokeAgentTool } from "./runtime/builtin-tools/invoke-agent.js";
+// import { listAgentsTool } from "./runtime/builtin-tools/list-agents.js";
+// import { V2CompatibilityLayer } from "./runtime/v2-compat.js";
+// import { getPolicyRegistry } from "./runtime/policy.js";
+// import { MCPToolLoader } from "./runtime/mcp-integration.js";
+// import { SkillLoader } from "./runtime/skill-integration.js";
+// import { registerMemoryTool } from "./runtime/memory-integration.js";
 import { DependencyResolver } from "./runtime/dependency-resolver.js";
+import { AgentLockFile } from "./lockfile.js";
+import { validateAgentJson, validateWorkerYaml, formatValidationResult } from "./validator.js";
+import { previewPipeline, formatPipelinePreview, generateMermaidDiagram, dryRunPipeline, formatDryRunResult } from "./preview.js";
 
 const VERSION = "1.0.0";
 
@@ -70,7 +77,6 @@ Usage:
   agent-deploy import <source> [options]
   agent-deploy upload <agent-dir> [options]
   agent-deploy deploy <agent-dir> [options]
-  agent-deploy run <agent-dir> [options]
   agent-deploy use <agent-id|agent-dir> [options]
   agent-deploy list [options]
   agent-deploy search <query> [options]
@@ -89,6 +95,7 @@ Usage:
   agent-deploy workflow list [--tag <tag>] [--category <cat>] [--market <url>]
   agent-deploy workflow validate <workflow-dir>
 
+  agent-deploy check-updates [options]
   agent-deploy clean [agent-id]
   agent-deploy --help
   agent-deploy --version
@@ -97,9 +104,10 @@ Commands:
   import <source>       Import agent from AI tool format to agent.json
   upload <agent-dir>    Upload agent to Market
   deploy <agent-dir>    Deploy agent to AI coding tool(s)
-  run <agent-dir>       Execute agent with runtime engine
   use <agent-id|dir>    Download + adapt + install (local by default)
   clean [agent-id]      Clean global agent installations
+  validate <agent-dir>   Validate agent.json / worker.yaml structure
+  preview <agent-dir>    Preview pipeline execution flow (dry-run)
   list                  List local agents
   search <query>        Search agents in Market
   info <agent-id>       Show detailed agent information
@@ -107,6 +115,7 @@ Commands:
   templates             List available agent templates
   team <action>         Manage teams (package/upload/download/list/validate)
   workflow <action>     Manage workflows (package/upload/download/list/validate)
+  check-updates         Check for updates to deployed agents
 
 Import Options:
   -o, --output <dir>    Output directory (default: ./imported-agents)
@@ -128,18 +137,12 @@ Deploy Options:
   -f, --target-file <path>  Target file path (relative) where agent should be installed (required)
   -h, --help            Show this help message
 
-Run Options:
-  --args <json>         Arguments to pass to agent (JSON object)
-  --cwd <dir>           Working directory for agent execution (default: agent directory)
-  --env <json>          Environment variables (JSON object)
-  -v, --verbose         Verbose output (show step details)
-  --trusted            Grant full trust to agent (allows bash, network, filesystem access)
-  -h, --help            Show this help message
-
 Use Options:
   -m, --market <url>    Market API URL (for downloading from market)
   -o, --output <dir>    Download output directory (default: ./downloaded-agents)
   -l, --level <level>   Install level: project, user, or both (default: both)
+  --with-deps           Resolve and install dependencies recursively
+  --no-deps             Skip dependency resolution (default: auto-resolve)
   -h, --help            Show this help message
 
 List Options:
@@ -173,11 +176,6 @@ Examples:
 
   # Deploy to specific tool
   agent-deploy deploy ./imported-agents/my-agent -t cursor
-
-  # Run agent with runtime engine
-  agent-deploy run ./agents/my-agent
-  agent-deploy run ./agents/my-agent --args '{"input": "data"}'
-  agent-deploy run ./agents/my-agent --verbose
 
   # Download and install agent from Market
   agent-deploy use my-agent
@@ -864,221 +862,22 @@ Examples:
 }
 
 /**
- * Handle run command
+ * Handle run command — DEPRECATED
+ * Agent execution has been moved to agent-compose (Runtime Engine).
+ * This command is preserved for backward compatibility but will not execute.
  */
 async function handleRunCommand(args: string[]) {
-  try {
-    // Parse arguments
-    const { values, positionals } = parseArgs({
-      args,
-      options: {
-        args: { type: "string", multiple: true },
-        cwd: { type: "string" },
-        env: { type: "string", multiple: true },
-        verbose: { type: "boolean", short: "v", default: false },
-        trusted: { type: "boolean", default: false },
-        help: { type: "boolean", short: "h", default: false },
-      },
-      allowPositionals: true,
-    });
-
-    if (values.help) {
-      console.log(`
-Usage: agent-deploy run <agent-dir> [options]
-
-Execute an agent using the runtime engine.
-
-Arguments:
-  <agent-dir>           Path to agent directory (containing agent.json and worker.yaml)
-
-Options:
-  --args <key=value>    Arguments to pass to agent (key=value or JSON object, repeatable)
-  --cwd <dir>           Working directory for agent execution (default: agent directory)
-  --env <key=value>     Environment variables (key=value or JSON object, repeatable)
-  --trusted             Trust the agent (allow network, shell, filesystem access)
-  -v, --verbose         Verbose output (show step details)
-  -h, --help            Show this help message
-
-Examples:
-  agent-deploy run ./agents/my-agent
-  agent-deploy run ./agents/processor --args file_path=data.txt --args lang=en
-  agent-deploy run ./agents/processor --args '{"file_path":"data.txt"}'
-  agent-deploy run ./agents/builder --cwd ./project --verbose
-      `);
-      return;
-    }
-
-    // Get agent directory
-    const agentDir = positionals[0];
-    if (!agentDir) {
-      console.error("❌ Error: agent directory is required\n");
-      console.error("Usage: agent-deploy run <agent-dir> [options]");
-      console.error("Run 'agent-deploy run --help' for more information");
-      process.exit(1);
-    }
-
-    // Resolve paths
-    const resolvedAgentDir = resolve(agentDir);
-
-    // Verify directory exists
-    if (!existsSync(resolvedAgentDir)) {
-      throw ErrorHandlers.fileNotFound(resolvedAgentDir, "directory");
-    }
-
-    // Verify agent.json exists
-    const agentJsonPath = path.join(resolvedAgentDir, "agent.json");
-    if (!existsSync(agentJsonPath)) {
-      throw ErrorHandlers.missingAgentJson(resolvedAgentDir);
-    }
-
-    // Load agent.json
-    const agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
-    const agentName = agentJson.identity?.name || agentJson.name || path.basename(resolvedAgentDir);
-
-    // Use compatibility layer to get worker.yaml (supports v2 agents)
-    const v2Compat = new V2CompatibilityLayer();
-    let workerYaml: WorkerYaml;
-
-    try {
-      workerYaml = v2Compat.getWorkerYaml(resolvedAgentDir);
-
-      // Show v2 compatibility message if applicable
-      if (v2Compat.isV2Agent(agentJsonPath)) {
-        console.log("ℹ️  v2 agent detected - running in compatibility mode\n");
-      }
-    } catch (error) {
-      throw new Error(`Failed to load agent: ${(error as Error).message}`);
-    }
-
-    // Parse arguments: supports --args '{"key":"val"}' or --args key=value (multiple)
-    let initialArgs: Record<string, any> = {};
-    if (values.args) {
-      const argsList = values.args as string[];
-      // Single JSON object
-      if (argsList.length === 1 && argsList[0].trimStart().startsWith("{")) {
-        try {
-          initialArgs = JSON.parse(argsList[0]);
-        } catch (error) {
-          console.error("❌ Error: Invalid JSON for --args");
-          console.error(`   ${(error as Error).message}`);
-          process.exit(1);
-        }
-      } else {
-        // key=value pairs (one or more --args)
-        for (const entry of argsList) {
-          const eq = entry.indexOf("=");
-          if (eq === -1) {
-            initialArgs[entry] = true;
-          } else {
-            const k = entry.slice(0, eq);
-            const v = entry.slice(eq + 1);
-            // Try to coerce numbers and booleans
-            if (v === "true") initialArgs[k] = true;
-            else if (v === "false") initialArgs[k] = false;
-            else if (!isNaN(Number(v)) && v !== "") initialArgs[k] = Number(v);
-            else initialArgs[k] = v;
-          }
-        }
-      }
-    }
-
-    // Parse environment variables: start with process.env, then override with --env
-    let envVars: Record<string, string> = { ...process.env as Record<string, string> };
-    if (values.env) {
-      const envList = values.env as string[];
-      if (envList.length === 1 && envList[0].trimStart().startsWith("{")) {
-        try {
-          envVars = JSON.parse(envList[0]);
-        } catch (error) {
-          console.error("❌ Error: Invalid JSON for --env");
-          console.error(`   ${(error as Error).message}`);
-          process.exit(1);
-        }
-      } else {
-        for (const entry of envList) {
-          const eq = entry.indexOf("=");
-          if (eq !== -1) {
-            envVars[entry.slice(0, eq)] = entry.slice(eq + 1);
-          }
-        }
-      }
-    }
-
-    // Determine working directory
-    const workingDir = values.cwd ? resolve(values.cwd as string) : resolvedAgentDir;
-
-    // Display execution info
-    console.log(`🚀 Running agent: ${agentName}\n`);
-    console.log(`Agent directory: ${resolvedAgentDir}`);
-    console.log(`Working directory: ${workingDir}`);
-    if (Object.keys(initialArgs).length > 0) {
-      console.log(`Arguments: ${JSON.stringify(initialArgs)}`);
-    }
-    if (Object.keys(envVars).length > 0) {
-      console.log(`Environment: ${JSON.stringify(envVars)}`);
-    }
-    console.log();
-
-    // Execute agent using AgentExecutor (unified execution engine)
-    const result = await AgentExecutor.execute({
-      agent: resolvedAgentDir,
-      input: initialArgs,
-      overrides: {
-        trusted: values.trusted as boolean,
-        cwd: workingDir,
-        env: envVars,
-      },
-      verbose: values.verbose as boolean,
-    });
-
-    if (!result.success) {
-      console.error(result.output?.error || 'Pipeline execution failed (no error details available)');
-      if (result.summary?.failed_steps) {
-        console.error(`Summary: ${result.summary.failed_steps} step(s) failed, ${result.summary.total_steps} total`);
-      }
-      process.exit(1);
-    }
-
-    // Restore context for display purposes (AgentExecutor returns its own context)
-    const context = ExecutionContextManager.create({
-      agent: { name: result.agent, identity: { name: result.agent } },
-      initialArgs,
-      cwd: workingDir,
-      env: envVars,
-    });
-
-    const duration = result.duration_ms;
-
-
-
-    // Display results
-    console.log("\n✅ Pipeline execution completed!\n");
-    console.log(`Duration: ${duration}ms`);
-
-    // Show execution summary
-    const summary = ExecutionContextManager.getSummary(context);
-    console.log(`\nExecution Summary:`);
-    console.log(`  Total steps:    ${summary.total_steps}`);
-    console.log(`  Successful:     ${summary.successful_steps}`);
-    console.log(`  Failed:         ${summary.failed_steps}`);
-
-    // Show result
-    if (result !== null && result !== undefined) {
-      console.log(`\nResult:`);
-      if (typeof result === "object") {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(result);
-      }
-    }
-
-    // Exit with appropriate code
-    if (summary.failed_steps > 0) {
-      process.exit(1);
-    }
-  } catch (error) {
-    handleCommandError(error as Error, "run");
-  }
+  console.error("⚠️  The 'run' command has been deprecated and moved to agent-compose.");
+  console.error("");
+  console.error("Agent execution is now handled by the agent-compose Runtime Engine.");
+  console.error("Please use agent-compose to run agents:");
+  console.error("");
+  console.error("  agent-compose run <agent-dir>");
+  console.error("  agent-compose market run <agent-name>");
+  console.error("");
+  console.error("If you need the legacy runtime, it is still available in:");
+  console.error("  node/src/runtime/ (deprecated — will be removed in a future version)");
+  process.exit(1);
 }
 
 /**
@@ -1094,6 +893,8 @@ async function handleUseCommand(args: string[]) {
         output: { type: "string", short: "o" },
         level: { type: "string", short: "l" },
         global: { type: "boolean", default: false },
+        "with-deps": { type: "boolean", default: false },
+        "no-deps": { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
       allowPositionals: true,
@@ -1113,6 +914,8 @@ Options:
   -m, --market <url>    Market API URL (default: $MARKET_API_URL or http://localhost:8321)
   -o, --output <dir>    Download output directory (default: ./downloaded-agents)
   -l, --level <level>   Install level: project, user, or both (default: both)
+  --with-deps           Resolve and install dependencies recursively
+  --no-deps             Skip dependency resolution (default: auto-resolve)
   -h, --help            Show this help message
 
 Examples:
@@ -1178,6 +981,50 @@ Examples:
     console.log(`   Source: ${agentSource}`);
     console.log(`   This agent will run in RESTRICTED mode by default.`);
     console.log(`   Use 'agent-deploy run --trusted' if you trust this publisher.\n`);
+
+    // Dependency resolution
+    const withDeps = values["with-deps"] as boolean;
+    const noDeps = values["no-deps"] as boolean;
+    const shouldResolveDeps = withDeps || (!noDeps && agentJson.dependencies?.agents);
+
+    if (shouldResolveDeps && !noDeps) {
+      console.log(`📦 Resolving dependencies...\n`);
+      const marketUrl = values.market as string || process.env.MARKET_API_URL || "http://localhost:8321";
+      const resolver = new DependencyResolver(marketUrl);
+
+      try {
+        const deps = await resolver.resolve(agentPath);
+        if (deps.size > 0) {
+          console.log(`Found ${deps.size} dependency(ies):`);
+          for (const [name, dep] of deps) {
+            console.log(`  - ${name}@${dep.version} (${dep.source})`);
+          }
+          console.log();
+
+          // Install dependencies to agent's deps directory
+          const depsDir = path.join(agentPath, "deps");
+          await resolver.installDependencies(Array.from(deps.values()), depsDir);
+          console.log(`✅ Dependencies installed to: ${depsDir}\n`);
+
+          // Update lock file
+          const lockFile = new AgentLockFile(agentPath);
+          lockFile.update(agentName, agentVersion, Array.from(deps.values()));
+          console.log(`🔒 Lock file updated: ${lockFile.getPath()}\n`);
+        } else {
+          console.log(`No dependencies found.\n`);
+        }
+      } catch (depError) {
+        const msg = depError instanceof Error ? depError.message : String(depError);
+        console.error(`❌ Dependency resolution failed: ${msg}\n`);
+        if (withDeps) {
+          // --with-deps was explicitly requested, fail hard
+          process.exit(1);
+        }
+        // Otherwise continue without deps
+      }
+    } else if (noDeps) {
+      console.log(`⏭️  Skipping dependency resolution (--no-deps)\n`);
+    }
 
     if (!isGlobal) {
       console.log(`📁 Local mode: Agent stored at ${agentPath}`);
@@ -1262,6 +1109,121 @@ Examples:
     }
   } catch (error) {
     handleCommandError(error as Error, 'use');
+  }
+}
+
+/**
+ * Handle check-updates command
+ */
+async function handleCheckUpdatesCommand(args: string[]) {
+  try {
+    const { values } = parseArgs({
+      args,
+      options: {
+        market: { type: "string", short: "m" },
+        "include-local": { type: "boolean", default: false },
+        help: { type: "boolean", short: "h", default: false },
+      },
+      allowPositionals: true,
+    });
+
+    if (values.help) {
+      console.log(`
+Usage: agent-deploy check-updates [options]
+
+Check for updates to deployed agents by comparing local versions with Market versions.
+
+Options:
+  -m, --market <url>     Market API URL (default: $MARKET_API_URL or http://localhost:8321)
+  --include-local        Also check local agents not tracked in deployment state
+  -h, --help             Show this help message
+
+Examples:
+  agent-deploy check-updates
+  agent-deploy check-updates -m http://market.example.com
+  agent-deploy check-updates --include-local
+      `);
+      return;
+    }
+
+    console.log("🔍 Checking for agent updates...\n");
+
+    const marketUrl = values.market as string || process.env.MARKET_API_URL || "http://localhost:8321";
+    const checker = new UpdateChecker({
+      marketUrl,
+      includeLocalAgents: values["include-local"] as boolean,
+    });
+
+    const updates = await checker.checkAll();
+    const summary = checker["summarizeUpdates"](updates);
+
+    if (updates.length === 0) {
+      console.log("No deployed agents found.");
+      console.log("\n💡 Deploy agents first with 'agent-deploy deploy' or 'agent-deploy use --global'");
+      return;
+    }
+
+    // Display results
+    const upToDate = updates.filter(u => !u.isUpdateAvailable && !u.error);
+    const hasUpdates = updates.filter(u => u.isUpdateAvailable);
+    const failed = updates.filter(u => u.error);
+
+    if (hasUpdates.length > 0) {
+      console.log(`📦 ${hasUpdates.length} update(s) available:\n`);
+      hasUpdates.forEach((u, idx) => {
+        console.log(`${idx + 1}. ${u.agentId}`);
+        console.log(`   Current:  ${u.currentVersion}`);
+        console.log(`   Latest:   ${u.latestVersion}`);
+        if (u.updateLevel) {
+          const levelEmoji = u.updateLevel === "major" ? "🔴" : u.updateLevel === "minor" ? "🟡" : "🟢";
+          console.log(`   Level:    ${levelEmoji} ${u.updateLevel}`);
+        }
+        if (u.releaseDate) {
+          console.log(`   Released: ${new Date(u.releaseDate).toLocaleDateString()}`);
+        }
+        if (u.changelog) {
+          const shortLog = u.changelog.length > 80 ? u.changelog.substring(0, 80) + "..." : u.changelog;
+          console.log(`   Changes:  ${shortLog}`);
+        }
+        console.log();
+      });
+    }
+
+    if (upToDate.length > 0) {
+      console.log(`✅ ${upToDate.length} agent(s) up to date:`);
+      upToDate.forEach(u => {
+        console.log(`   - ${u.agentId} @ ${u.currentVersion}`);
+      });
+      console.log();
+    }
+
+    if (failed.length > 0) {
+      console.log(`⚠️  ${failed.length} check(s) failed:`);
+      failed.forEach(u => {
+        console.log(`   - ${u.agentId}: ${u.error}`);
+      });
+      console.log();
+    }
+
+    // Summary
+    console.log("=".repeat(50));
+    console.log("📊 Summary:");
+    console.log(`   Total checked: ${updates.length}`);
+    console.log(`   Up to date:    ${summary.upToDate}`);
+    console.log(`   Has updates:   ${summary.hasUpdates}`);
+    if (summary.hasUpdates > 0) {
+      console.log(`      - Major: ${summary.updatesByLevel.major}`);
+      console.log(`      - Minor: ${summary.updatesByLevel.minor}`);
+      console.log(`      - Patch: ${summary.updatesByLevel.patch}`);
+    }
+    console.log(`   Check failed:  ${summary.checkFailed}`);
+
+    if (hasUpdates.length > 0) {
+      console.log("\n💡 Update an agent:");
+      console.log("   agent-deploy use <agent-id> --global");
+    }
+  } catch (error) {
+    handleCommandError(error as Error, "check-updates");
   }
 }
 
@@ -1384,13 +1346,192 @@ async function main() {
     await handleTeamCommand(args.slice(1));
   } else if (command === "workflow") {
     await handleWorkflowCommand(args.slice(1));
+  } else if (command === "check-updates") {
+    await handleCheckUpdatesCommand(args.slice(1));
   } else if (command === "clean") {
     await handleCleanCommand(args.slice(1));
+  } else if (command === "validate") {
+    await handleValidateCommand(args.slice(1));
+  } else if (command === "preview") {
+    await handlePreviewCommand(args.slice(1));
   } else {
     console.error(`❌ Unknown command: ${command}\n`);
-    console.error("Available commands: import, upload, deploy, run, use, list, search, info, init, templates, team, workflow, clean");
+    console.error("Available commands: import, upload, deploy, run, use, list, search, info, init, templates, team, workflow, clean, validate, preview");
     console.error("Run 'agent-deploy --help' for more information");
     process.exit(1);
+  }
+}
+
+/**
+ * Validate agent.json / worker.yaml structure (config-only, no execution).
+ */
+async function handleValidateCommand(args: string[]) {
+  try {
+    const { values, positionals } = parseArgs({
+      args,
+      options: {
+        help: { type: "boolean", short: "h", default: false },
+        "worker-yaml": { type: "string" },
+        json: { type: "boolean", default: false },
+      },
+      allowPositionals: true,
+    });
+
+    if (values.help) {
+      console.log(`
+Usage: agent-deploy validate <agent-dir> [options]
+
+Validate agent.json and/or worker.yaml structure without executing.
+
+Arguments:
+  <agent-dir>           Path to agent directory containing agent.json
+
+Options:
+  --worker-yaml <path>  Path to worker.yaml (default: <agent-dir>/worker.yaml)
+  --json                Output result as JSON
+  -h, --help            Show this help message
+
+Examples:
+  agent-deploy validate ./agents/my-agent
+  agent-deploy validate ./agents/my-agent --worker-yaml ./agents/my-agent/pipeline.yaml
+      `);
+      return;
+    }
+
+    const agentDir = positionals[0];
+    if (!agentDir) {
+      console.error("Error: agent directory is required\n");
+      console.error("Usage: agent-deploy validate <agent-dir>");
+      process.exit(1);
+    }
+
+    const resolvedDir = resolve(agentDir);
+    const agentJsonPath = path.join(resolvedDir, "agent.json");
+
+    // Validate agent.json
+    const agentResult = validateAgentJson(agentJsonPath);
+
+    // Validate worker.yaml (if exists)
+    const workerYamlPath = values["worker-yaml"]
+      ? resolve(values["worker-yaml"] as string)
+      : path.join(resolvedDir, "worker.yaml");
+    let workerResult = null;
+    if (existsSync(workerYamlPath)) {
+      try {
+        const raw = fs.readFileSync(workerYamlPath, "utf-8");
+        const workerYaml = yaml.load(raw) as any;
+        workerResult = validateWorkerYaml(workerYamlPath);
+        // Store parsed data for potential preview use
+        (workerResult as any)._parsed = workerYaml;
+      } catch (e: any) {
+        workerResult = {
+          valid: false,
+          errors: [{ field: "file", message: `Failed to parse worker.yaml: ${e.message}`, severity: "error" as const }],
+          warnings: [],
+        };
+      }
+    }
+
+    // Output
+    if (values.json) {
+      console.log(JSON.stringify({ agent: agentResult, worker: workerResult }, null, 2));
+    } else {
+      console.log(formatValidationResult(agentResult));
+      if (workerResult) {
+        console.log("\n--- worker.yaml ---");
+        console.log(formatValidationResult(workerResult));
+      } else {
+        console.log("\n(No worker.yaml found — skipping pipeline validation)");
+      }
+
+      const allValid = agentResult.valid && (workerResult === null || workerResult.valid);
+      console.log(`\nOverall: ${allValid ? "VALID" : "INVALID"}`);
+      if (!allValid) {
+        process.exit(1);
+      }
+    }
+  } catch (error) {
+    handleCommandError(error as Error, "validate");
+  }
+}
+
+/**
+ * Preview pipeline execution flow (dry-run, no execution).
+ */
+async function handlePreviewCommand(args: string[]) {
+  try {
+    const { values, positionals } = parseArgs({
+      args,
+      options: {
+        help: { type: "boolean", short: "h", default: false },
+        "worker-yaml": { type: "string" },
+        format: { type: "string", default: "text" },
+        "dry-run": { type: "boolean", default: false },
+      },
+      allowPositionals: true,
+    });
+
+    if (values.help) {
+      console.log(`
+Usage: agent-deploy preview <agent-dir> [options]
+
+Preview pipeline execution flow without executing.
+
+Arguments:
+  <agent-dir>           Path to agent directory containing worker.yaml
+
+Options:
+  --worker-yaml <path>  Path to worker.yaml (default: <agent-dir>/worker.yaml)
+  --format <format>     Output format: text, mermaid (default: text)
+  --dry-run             Simulate execution with mock inputs/outputs
+  -h, --help            Show this help message
+
+Examples:
+  agent-deploy preview ./agents/my-agent
+  agent-deploy preview ./agents/my-agent --format mermaid
+  agent-deploy preview ./agents/my-agent --dry-run
+      `);
+      return;
+    }
+
+    const agentDir = positionals[0];
+    if (!agentDir) {
+      console.error("Error: agent directory is required\n");
+      console.error("Usage: agent-deploy preview <agent-dir>");
+      process.exit(1);
+    }
+
+    const resolvedDir = resolve(agentDir);
+    const workerYamlPath = values["worker-yaml"]
+      ? resolve(values["worker-yaml"] as string)
+      : path.join(resolvedDir, "worker.yaml");
+
+    if (!existsSync(workerYamlPath)) {
+      console.error(`Error: worker.yaml not found at ${workerYamlPath}`);
+      process.exit(1);
+    }
+
+    const raw = fs.readFileSync(workerYamlPath, "utf-8");
+    const workerYaml = yaml.load(raw) as any;
+
+    if (!workerYaml.pipeline || !Array.isArray(workerYaml.pipeline)) {
+      console.error("Error: worker.yaml must contain a 'pipeline' array");
+      process.exit(1);
+    }
+
+    const format = values.format as string;
+
+    if (format === "mermaid") {
+      console.log(generateMermaidDiagram(workerYaml));
+    } else if (values["dry-run"]) {
+      const results = dryRunPipeline(workerYaml);
+      console.log(formatDryRunResult(results));
+    } else {
+      const previews = previewPipeline(workerYaml);
+      console.log(formatPipelinePreview(previews));
+    }
+  } catch (error) {
+    handleCommandError(error as Error, "preview");
   }
 }
 
@@ -1646,7 +1787,7 @@ Examples:
       console.log(`📥 Downloading team: ${teamName}...\n`);
 
       const result = await downloadTeam({
-        teamName,
+        teamId: teamName,
         outputDir,
         version: values.version as string | undefined,
         marketUrl: values.market as string | undefined,
@@ -1960,7 +2101,7 @@ Examples:
       console.log(`📥 Downloading workflow: ${workflowName}...\n`);
 
       const result = await downloadWorkflow({
-        workflowName,
+        workflowId: workflowName,
         outputDir,
         version: values.version as string | undefined,
         marketUrl: values.market as string | undefined,

@@ -1,20 +1,30 @@
-import { execSync } from "child_process";
+import { spawn } from "child_process";
 import { Tool } from "../pipeline.js";
 import { ExecutionContext } from "../types.js";
 import { getPolicyRegistry, DANGEROUS_COMMAND_PATTERNS } from "../policy.js";
+import { SandboxRuntime, SandboxOptions, createSandbox, SandboxConfig } from "../sandbox.js";
 
 /**
  * Bash tool
- * Executes shell commands
+ * Executes shell commands with policy enforcement
  */
 export class BashTool implements Tool {
   name = "bash";
+  private sandbox?: SandboxRuntime;
+  private sandboxConfig?: SandboxConfig;
+
+  constructor(sandboxConfig?: SandboxConfig) {
+    if (sandboxConfig?.enabled && sandboxConfig.runtime) {
+      this.sandboxConfig = sandboxConfig;
+      this.sandbox = createSandbox(sandboxConfig.runtime);
+    }
+  }
 
   async execute(
     args: {
       command: string;
-      cwd?: string;
       timeout?: number;
+      cwd?: string;
       env?: Record<string, string>;
     },
     context: ExecutionContext
@@ -24,92 +34,106 @@ export class BashTool implements Tool {
     exit_code: number;
     duration_ms: number;
   }> {
-    // Validate args
     if (!args.command) {
       throw new Error("bash: 'command' parameter is required");
     }
 
-    // Determine working directory
-    const cwd = args.cwd || context.cwd;
-
-    // Merge environment variables
-    const env = {
-      ...context.env,
-      ...(args.env || {}),
-    };
-
-    // Security: check execution policy
+    // Policy check
     const agentName = context.agent?.identity?.name || context.agent?.name || "unknown";
     const policy = getPolicyRegistry().get(agentName);
     if (!policy.allowBash) {
       throw new Error(
         `bash: Shell execution is blocked by security policy. ` +
-        `Use --trusted flag to allow bash commands for agent '${agentName}'.`
+        `Agent '${agentName}' policy level: ${policy.level}. ` +
+        `Use --policy-level trusted to allow bash execution.`
       );
     }
 
-    // Security: block dangerous command patterns (always enforced)
+    // Dangerous command check (always enforced, even in trusted mode)
     for (const pattern of DANGEROUS_COMMAND_PATTERNS) {
       if (pattern.test(args.command)) {
         throw new Error(
-          `bash: Command blocked by security policy. Pattern matched: ${pattern}`
+          `bash: Command blocked by security policy: dangerous pattern detected.`
         );
       }
     }
 
-    // Timeout (default 2 minutes)
-    const timeout = args.timeout || 120000;
+    const timeout = Math.min(
+      args.timeout || policy.maxExecutionTime,
+      policy.maxExecutionTime
+    );
+    const cwd = args.cwd || context.cwd || process.cwd();
+    const env = { ...context.env, ...(args.env || {}) };
 
+    // Use sandbox if configured and policy level is trusted
+    if (this.sandbox && this.sandboxConfig && policy.level === "trusted") {
+      const sandboxOptions: SandboxOptions = {
+        image: this.sandboxConfig.default_image || "node:20-alpine",
+        workDir: cwd,
+        env,
+        cpuLimit: this.sandboxConfig.resources?.cpu || "1.0",
+        memoryLimit: this.sandboxConfig.resources?.memory || "512m",
+        network: this.sandboxConfig.resources?.network || "none",
+        timeoutMs: timeout,
+      };
+
+      const result = await this.sandbox.execute(args.command, sandboxOptions);
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exitCode,
+        duration_ms: result.durationMs,
+      };
+    }
+
+    // Fallback to local execution
     const startTime = Date.now();
 
-    try {
-      // Execute command
-      const stdout = execSync(args.command, {
+    return new Promise((resolve, reject) => {
+      // Use platform-appropriate shell
+      const isWindows = process.platform === "win32";
+      const shell = isWindows ? "cmd" : "bash";
+      const shellFlag = isWindows ? "/c" : "-c";
+
+      const child = spawn(shell, [shellFlag, args.command], {
         cwd,
         env,
         timeout,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        shell: process.platform === "win32" ? "cmd.exe" : "/bin/bash",
       });
 
-      const duration = Date.now() - startTime;
+      let stdout = "";
+      let stderr = "";
 
-      return {
-        stdout: stdout || "",
-        stderr: "",
-        exit_code: 0,
-        duration_ms: duration,
-      };
-    } catch (error: any) {
-      const duration = Date.now() - startTime;
+      child.stdout?.on("data", (data: Buffer) => {
+        stdout += data.toString();
+      });
 
-      // Handle timeout - check both killed flag and error code
-      if (error.killed || (error.code === "ETIMEDOUT")) {
-        throw new Error(
-          `bash: Command timed out after ${timeout}ms: ${args.command}`
-        );
-      }
+      child.stderr?.on("data", (data: Buffer) => {
+        stderr += data.toString();
+      });
 
-      // Handle non-zero exit code
-      const stdout = error.stdout ? error.stdout.toString("utf-8") : "";
-      const stderr = error.stderr ? error.stderr.toString("utf-8") : "";
-      const exitCode = error.status !== undefined ? error.status : 1;
-
-      // For non-zero exit codes, return the result instead of throwing
-      if (exitCode !== 0) {
-        return {
-          stdout,
-          stderr,
-          exit_code: exitCode,
+      child.on("close", (code: number | null) => {
+        const duration = Date.now() - startTime;
+        resolve({
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+          exit_code: code ?? -1,
           duration_ms: duration,
-        };
-      }
+        });
+      });
 
-      // For other errors, throw
-      throw new Error(
-        `bash: Command failed: ${error.message}`
-      );
+      child.on("error", (error: Error) => {
+        reject(new Error(`bash: Failed to execute command: ${error.message}`));
+      });
+    });
+  }
+
+  /**
+   * Clean up sandbox resources
+   */
+  async cleanup(): Promise<void> {
+    if (this.sandbox) {
+      await this.sandbox.cleanup();
     }
   }
 }

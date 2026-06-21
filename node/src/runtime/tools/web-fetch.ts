@@ -38,7 +38,7 @@ export class WebFetchTool implements Tool {
     let parsedUrl: URL;
     try {
       parsedUrl = new URL(args.url);
-    } catch (error) {
+    } catch {
       throw new Error(`web_fetch: Invalid URL: ${args.url}`);
     }
 
@@ -53,8 +53,28 @@ export class WebFetchTool implements Tool {
     if (!policy.allowNetwork) {
       throw new Error(
         `web_fetch: Network access is blocked by security policy. ` +
-        `Use --trusted flag to allow network requests for agent '${agentName}'.`
+        `Agent '${agentName}' policy level: ${policy.level}. ` +
+        `Use --policy-level standard or trusted to allow network requests.`
       );
+    }
+
+    // Security: check network whitelist
+    if (policy.networkWhitelist.length > 0) {
+      const hostname = parsedUrl.hostname;
+      const allowed = policy.networkWhitelist.some((pattern) => {
+        if (pattern.startsWith("*")) {
+          // Wildcard suffix match: *.example.com
+          const suffix = pattern.slice(1);
+          return hostname.endsWith(suffix);
+        }
+        return hostname === pattern || hostname.endsWith(`.${pattern}`);
+      });
+      if (!allowed) {
+        throw new Error(
+          `web_fetch: Host '${hostname}' is not in the network whitelist. ` +
+          `Allowed hosts: ${policy.networkWhitelist.join(", ")}`
+        );
+      }
     }
 
     // Security: block requests to internal IP ranges
@@ -80,10 +100,11 @@ export class WebFetchTool implements Tool {
         0,
         startTime
       );
-    } catch (error: any) {
+    } catch (error: unknown) {
       const duration = Date.now() - startTime;
+      const msg = error instanceof Error ? error.message : String(error);
       throw new Error(
-        `web_fetch: Request failed (${duration}ms): ${error.message}`
+        `web_fetch: Request failed (${duration}ms): ${msg}`
       );
     }
   }

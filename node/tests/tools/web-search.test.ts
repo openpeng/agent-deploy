@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { WebSearchTool } from "../../src/runtime/tools/web-search.js";
 import { ExecutionContextManager } from "../../src/runtime/context.js";
 import { ExecutionContext } from "../../src/runtime/types.js";
+import { getPolicyRegistry } from "../../src/runtime/policy.js";
 
 describe("WebSearchTool", () => {
   let tool: WebSearchTool;
@@ -20,6 +21,13 @@ describe("WebSearchTool", () => {
         BING_SEARCH_API_KEY: "test-bing-key",
       },
     });
+
+    // Grant web search access for tests
+    getPolicyRegistry().setLevel("test-agent", "standard");
+  });
+
+  afterEach(() => {
+    getPolicyRegistry().reset("test-agent");
   });
 
   describe("parameter validation", () => {
@@ -90,6 +98,25 @@ describe("WebSearchTool", () => {
           contextWithoutKey
         )
       ).rejects.toThrow("BING_SEARCH_API_KEY");
+    });
+  });
+
+  describe("policy enforcement", () => {
+    it("should block web search when policy is restricted", async () => {
+      getPolicyRegistry().setLevel("test-agent", "restricted");
+
+      await expect(
+        tool.execute({ query: "test" }, context)
+      ).rejects.toThrow("Web search is blocked by security policy");
+    });
+
+    it("should allow web search when policy is standard", async () => {
+      getPolicyRegistry().setLevel("test-agent", "standard");
+
+      // Verify policy check passes by inspecting the policy directly
+      const policy = getPolicyRegistry().get("test-agent");
+      expect(policy.allowWebSearch).toBe(true);
+      expect(policy.level).toBe("standard");
     });
   });
 

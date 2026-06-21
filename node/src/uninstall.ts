@@ -66,11 +66,11 @@ export function uninstallAgent(
       path: installPath,
       status: "uninstalled",
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
     return {
       tool: targetTool,
       path: installPath,
-      status: `error: ${err.message}`,
+      status: `error: ${(err as Error).message}`,
     };
   }
 }

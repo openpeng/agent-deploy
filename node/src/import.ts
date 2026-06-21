@@ -93,10 +93,10 @@ export function parseFrontmatter(content: string): { frontmatter: Record<string,
   const body = frontmatterMatch[2];
 
   // Simple YAML parser (supports key: value and arrays)
-  const frontmatter: Record<string, any> = {};
+  const frontmatter: Record<string, unknown> = {};
   const lines = yamlText.split("\n");
   let currentKey: string | null = null;
-  let currentArray: any[] = [];
+  let currentArray: unknown[] = [];
 
   for (const line of lines) {
     // Array item (starts with -)
@@ -118,7 +118,7 @@ export function parseFrontmatter(content: string): { frontmatter: Record<string,
       }
 
       const key = match[1];
-      let value: any = match[2].trim();
+      let value: unknown = match[2].trim();
 
       // Check if this is starting an array (empty value or ends with :)
       if (!value) {
@@ -128,9 +128,9 @@ export function parseFrontmatter(content: string): { frontmatter: Record<string,
       }
 
       // Remove quotes
-      if ((value.startsWith('"') && value.endsWith('"')) ||
-          (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1);
+      if ((typeof value === "string" && value.startsWith('"') && value.endsWith('"')) ||
+          (typeof value === "string" && value.startsWith("'") && value.endsWith("'"))) {
+        value = (value as string).slice(1, -1);
       }
 
       frontmatter[key] = value;

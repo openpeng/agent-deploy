@@ -1,0 +1,83 @@
+# Agent Deploy Policy Configuration
+# Place this file in one of the following locations:
+#   1. ./policy.yaml (current working directory)
+#   2. ~/.agent-deploy/policy.yaml (user home)
+#   3. /etc/agent-deploy/policy.yaml (system-wide)
+#
+# Override precedence: CLI args > env > user > agent > default
+
+default:
+  level: restricted
+  allowBash: false
+  allowNetwork: false
+  allowWebSearch: false
+  allowedPaths: []
+  blockedPaths:
+    - /etc/passwd
+    - /etc/shadow
+    - ~/.ssh
+    - /proc
+    - /sys
+  networkWhitelist: []
+  maxFileSize: 10485760        # 10 MB
+  maxExecutionTime: 300000     # 5 minutes
+  maxConcurrentAgents: 1
+  timeoutMs: 300000
+
+# Container sandbox configuration
+sandbox:
+  enabled: true
+  runtime: docker              # docker | gvisor | firecracker
+  default_image: node:20-alpine
+  resources:
+    cpu: "1.0"
+    memory: "512m"
+    network: none
+
+# Per-agent overrides
+agents:
+  code-reviewer:
+    level: standard
+    allowNetwork: true
+    allowWebSearch: true
+    allowedPaths:
+      - ./src
+      - ./docs
+    networkWhitelist:
+      - github.com
+      - api.github.com
+
+  builder:
+    level: trusted
+    allowBash: true
+    allowedPaths:
+      - ./
+    blockedPaths:
+      - ~/.ssh
+      - /etc
+
+# Per-user overrides
+users:
+  admin:
+    level: trusted
+    allowBash: true
+    allowNetwork: true
+    allowWebSearch: true
+
+# Per-environment overrides
+env:
+  production:
+    level: restricted
+    allowBash: false
+    allowNetwork: false
+    allowWebSearch: false
+    maxFileSize: 5242880       # 5 MB
+    maxExecutionTime: 120000   # 2 minutes
+
+  development:
+    level: standard
+    allowNetwork: true
+    allowWebSearch: true
+    allowedPaths:
+      - ./
+      - /tmp

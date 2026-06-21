@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-deploy-config
+  namespace: default
+data:
+  TRANSPORT: "http"
+  PORT: "3000"
+  NODE_ENV: "production"
+  DEBUG: "false"
+  MARKET_API_URL: "http://market-service:8321"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agent-deploy-secrets
+  namespace: default
+type: Opaque
+stringData:
+  MARKET_API_KEY: ""

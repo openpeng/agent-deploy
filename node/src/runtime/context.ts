@@ -1,4 +1,4 @@
-import { ExecutionContext, StepResult } from "./types.js";
+import { ExecutionContext, StepResult, AgentInfo } from "./types.js";
 
 /**
  * Manages execution context for pipeline execution
@@ -8,11 +8,11 @@ export class ExecutionContextManager {
    * Create a new execution context
    */
   static create(options: {
-    agent: any;
-    initialArgs: Record<string, any>;
+    agent: AgentInfo;
+    initialArgs: Record<string, unknown>;
     cwd?: string;
     env?: Record<string, string>;
-    sharedContext?: Record<string, any>;
+    sharedContext?: Record<string, unknown>;
     instructions?: string;
   }): ExecutionContext {
     return {
@@ -67,7 +67,7 @@ export class ExecutionContextManager {
   static setShared(
     context: ExecutionContext,
     key: string,
-    value: any
+    value: unknown
   ): void {
     context.sharedContext[key] = value;
   }
@@ -75,7 +75,7 @@ export class ExecutionContextManager {
   /**
    * Get a value from shared context
    */
-  static getShared(context: ExecutionContext, key: string): any {
+  static getShared(context: ExecutionContext, key: string): unknown {
     return context.sharedContext[key];
   }
 
@@ -124,14 +124,14 @@ export class ExecutionContextManager {
     context.instructions = instructions;
   }
 
-  static getAgent(context: ExecutionContext): any {
+  static getAgent(context: ExecutionContext): AgentInfo {
     return context.agent;
   }
 
   /**
    * Get initial arguments
    */
-  static getInitialArgs(context: ExecutionContext): Record<string, any> {
+  static getInitialArgs(context: ExecutionContext): Record<string, unknown> {
     return { ...context.initialArgs };
   }
 

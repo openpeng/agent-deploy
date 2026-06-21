@@ -28,9 +28,42 @@ interface AgentDescriptor {
   version: string;
   description: string;
   instructions: string;
-  capabilities: any[];
-  compatibility: Record<string, any>;
-  metadata: Record<string, any>;
+  capabilities: string[];
+  compatibility: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+}
+
+interface AgentJsonInstructions {
+  source: "inline" | "file";
+  content?: string;
+  file?: string;
+}
+
+interface AgentJsonSubagent {
+  name: string;
+  path: string;
+  description?: string;
+}
+
+interface AgentJsonEntry {
+  main_subagent?: string;
+}
+
+interface ParsedAgentJson {
+  identity?: Record<string, unknown>;
+  name?: string;
+  display_name?: string;
+  displayName?: string;
+  version?: string;
+  description?: string;
+  author?: string;
+  license?: string;
+  instructions?: AgentJsonInstructions | string;
+  capabilities?: string[];
+  compatibility?: Record<string, unknown>;
+  schema_version?: string;
+  subagents?: AgentJsonSubagent[];
+  entry?: AgentJsonEntry;
 }
 
 /**
@@ -49,10 +82,11 @@ function loadAgentDescriptor(agentPath: string): AgentDescriptor {
   if (existsSync(agentJsonPath)) {
     try {
       const raw = readFileSync(agentJsonPath, "utf8");
-      const agentJson = JSON.parse(raw);
+      const agentJson = JSON.parse(raw) as ParsedAgentJson;
       return parseAgentJson(agentJson, agentPath);
-    } catch (err: any) {
-      console.warn(`[WARN] Failed to parse agent.json: ${err.message}`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[WARN] Failed to parse agent.json: ${msg}`);
       console.warn(`[WARN] Falling back to SKILL.md...`);
     }
   }
@@ -72,14 +106,14 @@ function loadAgentDescriptor(agentPath: string): AgentDescriptor {
 /**
  * Parse agent.json into AgentDescriptor.
  */
-function parseAgentJson(agentJson: any, agentPath: string): AgentDescriptor {
+function parseAgentJson(agentJson: ParsedAgentJson, agentPath: string): AgentDescriptor {
   // Support both new (identity) and old (flat) format
   const identity = agentJson.identity || agentJson;
 
-  const name = identity.name || agentPath.split("/").pop() || "agent";
-  const displayName = identity.display_name || identity.displayName || name;
-  const version = identity.version || "1.0.0";
-  const description = identity.description || "";
+  const name = (identity.name as string) || agentPath.split("/").pop() || "agent";
+  const displayName = (identity.display_name as string) || (identity.displayName as string) || name;
+  const version = (identity.version as string) || "1.0.0";
+  const description = (identity.description as string) || "";
 
   // Extract instructions (CORE CHANGE)
   let instructions = "";
@@ -87,7 +121,9 @@ function parseAgentJson(agentJson: any, agentPath: string): AgentDescriptor {
   if (agentJson.instructions) {
     const inst = agentJson.instructions;
 
-    if (inst.source === "inline") {
+    if (typeof inst === "string") {
+      instructions = inst;
+    } else if (inst.source === "inline") {
       instructions = inst.content || "";
     } else if (inst.source === "file") {
       const instFile = inst.file || "";
@@ -106,15 +142,15 @@ function parseAgentJson(agentJson: any, agentPath: string): AgentDescriptor {
   if (!instructions && agentJson.subagents && agentJson.subagents.length > 0) {
     const entry = agentJson.entry?.main_subagent || agentJson.subagents[0].name;
 
-    instructions = `# ${identity.display_name || identity.name}
+    instructions = `# ${displayName}
 
-${identity.description || ""}
+${description}
 
 ## Workflows
 
 This agent contains ${agentJson.subagents.length} sub-workflow(s):
 
-${agentJson.subagents.map((sub: any) => `- **${sub.name}** (\`${sub.path}\`): ${sub.description || "No description"}`).join("\n")}
+${agentJson.subagents.map((sub) => `- **${sub.name}** (\`${sub.path}\`): ${sub.description || "No description"}`).join("\n")}
 
 Entry workflow: **${entry}**
 
@@ -161,8 +197,8 @@ This agent is based on PilotDeck workflow orchestration. See individual \`.yaml\
 
   const metadata = {
     schema_version: agentJson.schema_version || "1.0",
-    author: identity.author || "",
-    license: identity.license || "MIT",
+    author: (identity.author as string) || "",
+    license: (identity.license as string) || "MIT",
   };
 
   return {
@@ -196,13 +232,13 @@ function parseSkillMd(skillPath: string): AgentDescriptor {
   const { frontmatter, body } = parseFrontmatter(raw);
 
   const fm = frontmatter ? parseYamlFrontmatter(frontmatter) : {};
-  const name = fm.name || skillPath.split("/").slice(-2, -1)[0] || "agent";
-  const description = (fm.description || "").trim();
+  const name = (fm.name as string) || skillPath.split("/").slice(-2, -1)[0] || "agent";
+  const description = ((fm.description as string) || "").trim();
 
   return {
     name,
-    displayName: fm.display_name || fm.displayName || name,
-    version: fm.version || "1.0.0",
+    displayName: (fm.display_name as string) || (fm.displayName as string) || name,
+    version: (fm.version as string) || "1.0.0",
     description,
     instructions: body,
     capabilities: [],
@@ -228,23 +264,39 @@ function parseFrontmatter(raw: string): { frontmatter: string | null; body: stri
 /**
  * Parse YAML frontmatter string into object (simplified).
  */
-function parseYamlFrontmatter(yaml: string): Record<string, any> {
-  const result: Record<string, any> = {};
-  const lines = yaml.split("\n");
+function parseYamlFrontmatter(yamlText: string): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  const lines = yamlText.split("\n");
   for (const line of lines) {
     const match = line.match(/^(\w+):\s*(.*)$/);
     if (match) {
       const key = match[1];
-      let value: any = match[2].trim();
+      let value: unknown = match[2].trim();
       // Remove quotes
-      if ((value.startsWith('"') && value.endsWith('"')) ||
-          (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1);
+      if ((typeof value === "string" && value.startsWith('"') && value.endsWith('"')) ||
+          (typeof value === "string" && value.startsWith("'") && value.endsWith("'"))) {
+        value = (value as string).slice(1, -1);
       }
       result[key] = value;
     }
   }
   return result;
+}
+
+interface WorkerYamlStep {
+  tool: string;
+  step: string;
+  args?: Record<string, unknown>;
+  output?: string;
+}
+
+interface WorkerYamlParsed {
+  pipeline?: WorkerYamlStep[];
+  shared_context?: Record<string, unknown>;
+}
+
+interface ToolInstructionFn {
+  (args: Record<string, unknown>): string;
 }
 
 /**
@@ -255,30 +307,30 @@ function loadWorkerYamlAsPrompt(agentPath: string, subagentPath: string): string
   const yamlPath = join(agentPath, subagentPath);
   if (!existsSync(yamlPath)) return null;
 
-  let parsed: any;
+  let parsed: WorkerYamlParsed | null = null;
   try {
     const content = readFileSync(yamlPath, "utf8");
-    parsed = yaml.load(content);
+    parsed = yaml.load(content) as WorkerYamlParsed | null;
   } catch {
     return null;
   }
 
   if (!parsed || !Array.isArray(parsed.pipeline)) return null;
 
-  const toolInstructions: Record<string, (args: any) => string> = {
-    write_file: (args: any) =>
+  const toolInstructions: Record<string, ToolInstructionFn> = {
+    write_file: (args) =>
       `Write the following content to file \`${args.path}\`:\n\`\`\`\n${args.content}\n\`\`\`${args.mode === "append" ? "\n(append to existing file)" : ""}`,
-    web_fetch: (args: any) =>
+    web_fetch: (args) =>
       `Fetch URL via HTTP ${args.method || "GET"}: \`${args.url}\``,
-    bash: (args: any) =>
+    bash: (args) =>
       `Run shell command:\n\`\`\`bash\n${args.command}\n\`\`\``,
-    read_file: (args: any) =>
+    read_file: (args) =>
       `Read file: \`${args.path}\``,
-    glob: (args: any) =>
+    glob: (args) =>
       `Find files matching pattern: \`${args.pattern}\``,
-    llm_chat: (args: any) =>
+    llm_chat: (args) =>
       `Ask LLM: ${args.prompt}`,
-    web_search: (args: any) =>
+    web_search: (args) =>
       `Search the web for: ${args.query}`,
   };
 
@@ -301,9 +353,9 @@ function loadWorkerYamlAsPrompt(agentPath: string, subagentPath: string): string
     ? `## Parameters\n\nProvide the following values when invoking this agent (use \`$ARGUMENTS\` or pass as key=value):\n\n${[...allVars].map(v => `- \`${v}\``).join("\n")}\n\n`
     : "";
 
-  const steps: string[] = parsed.pipeline.map((step: any, i: number) => {
+  const steps: string[] = parsed.pipeline.map((step, i) => {
     const num = i + 1;
-    const toolFn = (toolInstructions as any)[step.tool];
+    const toolFn = toolInstructions[step.tool];
     const instruction = toolFn
       ? toolFn(step.args || {})
       : `Call tool \`${step.tool}\` with args: ${JSON.stringify(step.args || {})}`;
@@ -392,7 +444,7 @@ export function adaptAgent(agentPath: string, target: string, targetFile?: strin
       // Check for worker.yaml pipeline (direct or via subagents)
       if (existsSync(agentJsonPath)) {
         try {
-          const agentJson = JSON.parse(readFileSync(agentJsonPath, "utf8"));
+          const agentJson = JSON.parse(readFileSync(agentJsonPath, "utf8")) as ParsedAgentJson;
           let pipelinePath: string | null = null;
 
           // Check direct worker.yaml in agent dir
@@ -403,7 +455,7 @@ export function adaptAgent(agentPath: string, target: string, targetFile?: strin
           // Check subagents for entry point
           else if (agentJson.subagents && agentJson.subagents.length > 0) {
             const entryName = agentJson.entry?.main_subagent || agentJson.subagents[0].name;
-            const entrySubagent = agentJson.subagents.find((s: any) => s.name === entryName) || agentJson.subagents[0];
+            const entrySubagent = agentJson.subagents.find((s) => s.name === entryName) || agentJson.subagents[0];
             if (entrySubagent && entrySubagent.path) {
               pipelinePath = entrySubagent.path;
             }
@@ -443,11 +495,13 @@ export function adaptAgent(agentPath: string, target: string, targetFile?: strin
       let pipelinePrompt: string | null = null;
       if (existsSync(agentJsonPath)) {
         try {
-          const agentJson = JSON.parse(readFileSync(agentJsonPath, "utf8"));
+          const agentJson = JSON.parse(readFileSync(agentJsonPath, "utf8")) as ParsedAgentJson;
           if (agentJson.subagents && agentJson.subagents.length > 0) {
             const entrySubagentName = agentJson.entry?.main_subagent || agentJson.subagents[0].name;
-            const entrySubagent = agentJson.subagents.find((s: any) => s.name === entrySubagentName) || agentJson.subagents[0];
-            pipelinePrompt = loadWorkerYamlAsPrompt(agentPath, entrySubagent.path);
+            const entrySubagent = agentJson.subagents.find((s) => s.name === entrySubagentName) || agentJson.subagents[0];
+            if (entrySubagent?.path) {
+              pipelinePrompt = loadWorkerYamlAsPrompt(agentPath, entrySubagent.path);
+            }
           }
         } catch {
           // fall through to descriptor.instructions

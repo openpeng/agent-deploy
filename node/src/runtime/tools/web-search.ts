@@ -1,5 +1,34 @@
 import { Tool } from "../pipeline.js";
 import { ExecutionContext } from "../types.js";
+import { getPolicyRegistry } from "../policy.js";
+
+interface SearchResultItem {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+interface GoogleSearchItem {
+  title: string;
+  link: string;
+  snippet?: string;
+}
+
+interface BingWebPage {
+  name: string;
+  url: string;
+  snippet?: string;
+}
+
+interface BingSearchResponse {
+  error?: { message?: string };
+  webPages?: { value?: BingWebPage[] };
+}
+
+interface GoogleSearchResponse {
+  error?: { message?: string };
+  items?: GoogleSearchItem[];
+}
 
 /**
  * Web Search tool
@@ -25,11 +54,7 @@ export class WebSearchTool implements Tool {
     },
     context: ExecutionContext
   ): Promise<{
-    results: Array<{
-      title: string;
-      url: string;
-      snippet: string;
-    }>;
+    results: SearchResultItem[];
     query: string;
     engine: string;
   }> {
@@ -38,11 +63,22 @@ export class WebSearchTool implements Tool {
       throw new Error("web_search: 'query' parameter is required");
     }
 
+    // Policy check
+    const agentName = context.agent?.identity?.name || context.agent?.name || "unknown";
+    const policy = getPolicyRegistry().get(agentName);
+    if (!policy.allowWebSearch) {
+      throw new Error(
+        `web_search: Web search is blocked by security policy. ` +
+        `Agent '${agentName}' policy level: ${policy.level}. ` +
+        `Use --policy-level standard or trusted to allow web search.`
+      );
+    }
+
     const engine = args.engine || "duckduckgo";
     const maxResults = args.max_results || 10;
 
     try {
-      let results: Array<{ title: string; url: string; snippet: string }> = [];
+      let results: SearchResultItem[] = [];
 
       switch (engine) {
         case "duckduckgo":
@@ -83,8 +119,9 @@ export class WebSearchTool implements Tool {
         query: args.query,
         engine,
       };
-    } catch (error: any) {
-      throw new Error(`web_search: Search failed: ${error.message}`);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new Error(`web_search: Search failed: ${msg}`);
     }
   }
 
@@ -92,7 +129,7 @@ export class WebSearchTool implements Tool {
     query: string,
     maxResults: number,
     region?: string
-  ): Promise<Array<{ title: string; url: string; snippet: string }>> {
+  ): Promise<SearchResultItem[]> {
     // DuckDuckGo Instant Answer API (HTML scraping alternative)
     // Note: DuckDuckGo doesn't have an official API, using HTML fallback
     const url = new URL("https://html.duckduckgo.com/html/");
@@ -116,8 +153,9 @@ export class WebSearchTool implements Tool {
             // Simple HTML parsing for results
             const results = this.parseDuckDuckGoHTML(data, maxResults);
             resolve(results);
-          } catch (error: any) {
-            reject(new Error(`Failed to parse DuckDuckGo results: ${error.message}`));
+          } catch (error: unknown) {
+            const msg = error instanceof Error ? error.message : String(error);
+            reject(new Error(`Failed to parse DuckDuckGo results: ${msg}`));
           }
         });
 
@@ -129,14 +167,14 @@ export class WebSearchTool implements Tool {
   private parseDuckDuckGoHTML(
     html: string,
     maxResults: number
-  ): Array<{ title: string; url: string; snippet: string }> {
-    const results: Array<{ title: string; url: string; snippet: string }> = [];
+  ): SearchResultItem[] {
+    const results: SearchResultItem[] = [];
 
     // Simple regex-based parsing (not production-ready, just for demo)
     // In production, use a proper HTML parser like cheerio
     const resultRegex = /<div class="result[^"]*">[\s\S]*?<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
 
-    let match;
+    let match: RegExpExecArray | null;
     while ((match = resultRegex.exec(html)) !== null && results.length < maxResults) {
       const url = this.decodeHtmlEntities(match[1]);
       const title = this.stripHtmlTags(match[2]);
@@ -157,7 +195,7 @@ export class WebSearchTool implements Tool {
     searchEngineId?: string,
     language?: string,
     region?: string
-  ): Promise<Array<{ title: string; url: string; snippet: string }>> {
+  ): Promise<SearchResultItem[]> {
     if (!apiKey || !searchEngineId) {
       throw new Error(
         "Google Search requires GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_ENGINE_ID environment variables"
@@ -189,22 +227,23 @@ export class WebSearchTool implements Tool {
 
         res.on("end", () => {
           try {
-            const parsed = JSON.parse(data);
+            const parsed = JSON.parse(data) as GoogleSearchResponse;
 
             if (parsed.error) {
-              reject(new Error(parsed.error.message));
+              reject(new Error(parsed.error.message || "Google Search error"));
               return;
             }
 
-            const results = (parsed.items || []).map((item: any) => ({
+            const results = (parsed.items || []).map((item) => ({
               title: item.title,
               url: item.link,
               snippet: item.snippet || "",
             }));
 
             resolve(results);
-          } catch (error: any) {
-            reject(new Error(`Failed to parse Google results: ${error.message}`));
+          } catch (error: unknown) {
+            const msg = error instanceof Error ? error.message : String(error);
+            reject(new Error(`Failed to parse Google results: ${msg}`));
           }
         });
 
@@ -219,7 +258,7 @@ export class WebSearchTool implements Tool {
     apiKey?: string,
     language?: string,
     region?: string
-  ): Promise<Array<{ title: string; url: string; snippet: string }>> {
+  ): Promise<SearchResultItem[]> {
     if (!apiKey) {
       throw new Error("Bing Search requires BING_SEARCH_API_KEY environment variable");
     }
@@ -254,22 +293,23 @@ export class WebSearchTool implements Tool {
 
           res.on("end", () => {
             try {
-              const parsed = JSON.parse(data);
+              const parsed = JSON.parse(data) as BingSearchResponse;
 
               if (parsed.error) {
-                reject(new Error(parsed.error.message));
+                reject(new Error(parsed.error.message || "Bing Search error"));
                 return;
               }
 
-              const results = (parsed.webPages?.value || []).map((item: any) => ({
+              const results = (parsed.webPages?.value || []).map((item) => ({
                 title: item.name,
                 url: item.url,
                 snippet: item.snippet || "",
               }));
 
               resolve(results);
-            } catch (error: any) {
-              reject(new Error(`Failed to parse Bing results: ${error.message}`));
+            } catch (error: unknown) {
+              const msg = error instanceof Error ? error.message : String(error);
+              reject(new Error(`Failed to parse Bing results: ${msg}`));
             }
           });
 

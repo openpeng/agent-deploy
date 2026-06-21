@@ -5,6 +5,7 @@
  * - 上传 Agent 到 Market
  * - 从 Market 下载 Agent
  * - 搜索和查询 Agent
+ * - 版本管理（Agent/Team/Workflow）
  */
 
 import fs from "fs";
@@ -13,6 +14,10 @@ import os from "os";
 import { Readable } from "stream";
 import { AgentJsonV2 } from "./types.js";
 import { ErrorHandlers } from "./errors.js";
+import { getTracer } from "./telemetry.js";
+import { SpanStatusCode } from "@opentelemetry/api";
+import { recordMarketRequest } from "./metrics.js";
+import { AgentCache } from "./runtime/agent-cache.js";
 
 // ============================================================
 // 类型定义
@@ -43,6 +48,9 @@ export interface DownloadOptions {
   agentId: string;
   outputDir: string;
   marketUrl?: string;
+  version?: string;
+  /** 强制跳过缓存，重新下载 */
+  skipCache?: boolean;
 }
 
 export interface DownloadResult {
@@ -50,6 +58,8 @@ export interface DownloadResult {
   agent_id: string;
   output_path: string;
   message?: string;
+  /** 是否来自缓存 */
+  fromCache?: boolean;
 }
 
 export interface AgentInfo {
@@ -67,12 +77,21 @@ export interface AgentInfo {
   updated_at: string;
 }
 
+export interface VersionInfo {
+  version: string;
+  created_at: string;
+  changelog?: string;
+  author?: string;
+  downloads?: number;
+}
+
 export interface SearchOptions {
   query?: string;
   tag?: string;
   category?: string;
   limit?: number;
   offset?: number;
+  marketUrl?: string;
 }
 
 export interface SearchResult {
@@ -107,6 +126,7 @@ export interface TeamInfo {
   license?: string;
   readme?: string;
   download_count: number;
+  downloads: number;
   rating: number;
   rating_count: number;
   created_at: string;
@@ -134,6 +154,7 @@ export interface WorkflowInfo {
   license?: string;
   readme?: string;
   download_count: number;
+  downloads: number;
   rating: number;
   rating_count: number;
   created_at: string;
@@ -152,6 +173,7 @@ export interface TeamDownloadOptions {
   teamId: string;
   outputDir: string;
   marketUrl?: string;
+  version?: string;
 }
 
 export interface TeamSearchOptions {
@@ -160,6 +182,7 @@ export interface TeamSearchOptions {
   category?: string;
   limit?: number;
   offset?: number;
+  marketUrl?: string;
 }
 
 export interface TeamUploadResult {
@@ -194,6 +217,7 @@ export interface WorkflowDownloadOptions {
   workflowId: string;
   outputDir: string;
   marketUrl?: string;
+  version?: string;
 }
 
 export interface WorkflowSearchOptions {
@@ -202,6 +226,7 @@ export interface WorkflowSearchOptions {
   category?: string;
   limit?: number;
   offset?: number;
+  marketUrl?: string;
 }
 
 export interface WorkflowUploadResult {
@@ -229,190 +254,331 @@ export interface WorkflowSearchResult {
 // Market Client
 // ============================================================
 
+const marketTracer = getTracer("agent-deploy-market");
+
 export class MarketClient {
   private baseUrl: string;
   private apiKey?: string;
+  private cache: AgentCache;
 
   constructor(config: MarketConfig) {
     this.baseUrl = config.baseUrl || process.env.MARKET_API_URL || "http://localhost:8321";
     this.apiKey = config.apiKey || process.env.MARKET_API_KEY;
+    this.cache = new AgentCache();
+  }
+
+  /** 获取关联的缓存实例 */
+  getCache(): AgentCache {
+    return this.cache;
   }
 
   /**
    * 上传 Agent 到 Market
    */
   async uploadAgent(options: UploadOptions): Promise<UploadResult> {
-    const agentDir = path.resolve(options.agentDir);
-    const agentJsonPath = path.join(agentDir, "agent.json");
+    return marketTracer.startActiveSpan("market.upload_agent", async (span) => {
+      const agentDir = path.resolve(options.agentDir);
+      const agentJsonPath = path.join(agentDir, "agent.json");
+      span.setAttribute("market.agent_dir", agentDir);
 
-    // 验证 agent.json 存在
-    if (!fs.existsSync(agentJsonPath)) {
-      throw ErrorHandlers.missingAgentJson(agentDir);
-    }
-
-    // 读取 agent.json
-    let agentJson: AgentJsonV2;
-    try {
-      agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      throw ErrorHandlers.invalidAgentJson(agentJsonPath, msg);
-    }
-
-    const agentName = agentJson.identity.name;
-    const version = agentJson.identity.version;
-
-    // 打包 Agent 目录为 tar.gz
-    const packagePath = await this.packAgent(agentDir, agentName, version);
-
-    try {
-      const marketUrl = options.marketUrl || this.baseUrl;
-      const apiKey = options.apiKey || this.apiKey;
-
-      // Use native FormData + Blob for reliable multipart encoding via fetch
-      const formData = new FormData();
-      const fileBuffer = await fs.promises.readFile(packagePath);
-      const blob = new Blob([fileBuffer], { type: "application/gzip" });
-      formData.append("file", blob, `${agentName}-v${version}.tar.gz`);
-      formData.append("force", options.force ? "true" : "false");
-
-      const fetchHeaders: Record<string, string> = {};
-      if (apiKey) {
-        fetchHeaders["Authorization"] = `Bearer ${apiKey}`;
+      // 验证 agent.json 存在
+      if (!fs.existsSync(agentJsonPath)) {
+        const err = ErrorHandlers.missingAgentJson(agentDir);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+        span.recordException(err);
+        span.end();
+        throw err;
       }
 
-      const response = await fetch(`${marketUrl}/api/v1/agents`, {
-        method: "POST",
-        headers: fetchHeaders,
-        body: formData,
-      });
+      // 读取 agent.json
+      let agentJson: AgentJsonV2;
+      try {
+        agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const err = ErrorHandlers.invalidAgentJson(agentJsonPath, msg);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+        span.recordException(err);
+        span.end();
+        throw err;
+      }
 
-      if (!response.ok) {
-        if (response.status === 401 || response.status === 403) {
-          throw ErrorHandlers.authenticationError();
-        } else if (response.status === 409) {
-          throw ErrorHandlers.conflictError(agentName, version);
-        } else {
-          const error = await response.json().catch(() => ({ detail: response.statusText }));
-          throw new Error(error.detail || `Upload failed: ${response.statusText}`);
+      const agentName = agentJson.identity.name;
+      const version = agentJson.identity.version;
+      span.setAttribute("market.agent_name", agentName);
+      span.setAttribute("market.version", version);
+
+      // 打包 Agent 目录为 tar.gz
+      const packagePath = await this.packAgent(agentDir, agentName, version);
+
+      try {
+        const marketUrl = options.marketUrl || this.baseUrl;
+        const apiKey = options.apiKey || this.apiKey;
+
+        // Use native FormData + Blob for reliable multipart encoding via fetch
+        const formData = new FormData();
+        const fileBuffer = await fs.promises.readFile(packagePath);
+        const blob = new Blob([fileBuffer], { type: "application/gzip" });
+        formData.append("file", blob, `${agentName}-v${version}.tar.gz`);
+        formData.append("force", options.force ? "true" : "false");
+
+        const fetchHeaders: Record<string, string> = {};
+        if (apiKey) {
+          fetchHeaders["Authorization"] = `Bearer ${apiKey}`;
+        }
+
+        const response = await fetch(`${marketUrl}/api/v1/agents`, {
+          method: "POST",
+          headers: fetchHeaders,
+          body: formData,
+        });
+
+        if (!response.ok) {
+          recordMarketRequest("POST", "/api/v1/agents", "error");
+          if (response.status === 401 || response.status === 403) {
+            const err = ErrorHandlers.authenticationError();
+            span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+            span.recordException(err);
+            span.end();
+            throw err;
+          } else if (response.status === 409) {
+            const err = ErrorHandlers.conflictError(agentName, version);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+            span.recordException(err);
+            span.end();
+            throw err;
+          } else {
+            const error = await response.json().catch(() => ({ detail: response.statusText }));
+            const err = new Error(error.detail || `Upload failed: ${response.statusText}`);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+            span.recordException(err);
+            span.end();
+            throw err;
+          }
+        }
+
+        recordMarketRequest("POST", "/api/v1/agents", "success");
+        const result = await response.json();
+        span.setStatus({ code: SpanStatusCode.OK });
+        span.end();
+
+        return {
+          success: true,
+          agent_id: result.id || agentName,
+          agent_name: agentName,
+          version: version,
+          market_url: `${marketUrl}/agents/${agentName}`,
+          message: result.message || "Agent uploaded successfully",
+        };
+      } finally {
+        // 清理临时包文件
+        if (fs.existsSync(packagePath)) {
+          fs.unlinkSync(packagePath);
         }
       }
-
-      const result = await response.json();
-
-      return {
-        success: true,
-        agent_id: result.id || agentName,
-        agent_name: agentName,
-        version: version,
-        market_url: `${marketUrl}/agents/${agentName}`,
-        message: result.message || "Agent uploaded successfully",
-      };
-    } finally {
-      // 清理临时包文件
-      if (fs.existsSync(packagePath)) {
-        fs.unlinkSync(packagePath);
-      }
-    }
+    });
   }
 
   /**
-   * 从 Market 下载 Agent
+   * 从 Market 下载 Agent（支持缓存）
    */
   async downloadAgent(options: DownloadOptions): Promise<DownloadResult> {
-    const marketUrl = options.marketUrl || this.baseUrl;
-    const url = `${marketUrl}/api/v1/agents/${options.agentId}/download`;
+    return marketTracer.startActiveSpan("market.download_agent", async (span) => {
+      const versionSpec = options.version || "latest";
+      span.setAttribute("market.agent_id", options.agentId);
+      span.setAttribute("market.version_spec", versionSpec);
 
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        throw ErrorHandlers.notFoundError('Agent', options.agentId);
+      // 1. 检查缓存（除非 skipCache）
+      if (!options.skipCache) {
+        const cached = this.cache.get(options.agentId, versionSpec);
+        if (cached) {
+          // 复制到输出目录
+          const outputDir = path.resolve(options.outputDir);
+          if (!fs.existsSync(outputDir)) {
+            fs.mkdirSync(outputDir, { recursive: true });
+          }
+          const extractDir = path.join(outputDir, options.agentId);
+          this.copyDir(cached, extractDir);
+          span.setAttribute("market.from_cache", true);
+          span.setStatus({ code: SpanStatusCode.OK });
+          span.end();
+          return {
+            success: true,
+            agent_id: options.agentId,
+            output_path: extractDir,
+            message: "Agent loaded from cache",
+            fromCache: true,
+          };
+        }
       }
-      throw new Error(`Download failed: ${response.statusText}`);
-    }
 
-    // 确保输出目录存在
-    const outputDir = path.resolve(options.outputDir);
-    if (!fs.existsSync(outputDir)) {
-      fs.mkdirSync(outputDir, { recursive: true });
-    }
-
-    // 获取文件名
-    const contentDisposition = response.headers.get("content-disposition");
-    let filename = `${options.agentId}.tar.gz`;
-    if (contentDisposition) {
-      const match = contentDisposition.match(/filename="?([^"]+)"?/);
-      if (match) {
-        filename = match[1];
+      // 2. 从 Market 下载
+      const marketUrl = options.marketUrl || this.baseUrl;
+      let url = `${marketUrl}/api/v1/agents/${options.agentId}/download`;
+      if (options.version) {
+        url += `?version=${encodeURIComponent(options.version)}`;
       }
-    }
+      span.setAttribute("market.url", url);
 
-    // 保存文件
-    const outputPath = path.join(outputDir, filename);
-    const buffer = await response.arrayBuffer();
-    fs.writeFileSync(outputPath, Buffer.from(buffer));
+      const response = await fetch(url);
 
-    // 解压
-    const extractDir = path.join(outputDir, options.agentId);
-    await this.extractAgent(outputPath, extractDir);
+      if (!response.ok) {
+        recordMarketRequest("GET", "/api/v1/agents/{id}/download", "error");
+        if (response.status === 404) {
+          const err = ErrorHandlers.notFoundError('Agent', options.agentId);
+          span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+          span.recordException(err);
+          span.end();
+          throw err;
+        }
+        const err = new Error(`Download failed: ${response.statusText}`);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+        span.recordException(err);
+        span.end();
+        throw err;
+      }
 
-    // 清理压缩包
-    fs.unlinkSync(outputPath);
+      recordMarketRequest("GET", "/api/v1/agents/{id}/download", "success");
+      // 获取 etag
+      const etag = response.headers.get("etag") || undefined;
 
-    return {
-      success: true,
-      agent_id: options.agentId,
-      output_path: extractDir,
-      message: "Agent downloaded successfully",
-    };
+      // 确保输出目录存在
+      const outputDir = path.resolve(options.outputDir);
+      if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+      }
+
+      // 获取文件名
+      const contentDisposition = response.headers.get("content-disposition");
+      let filename = `${options.agentId}.tar.gz`;
+      if (contentDisposition) {
+        const match = contentDisposition.match(/filename="?([^"]+)"?/);
+        if (match) {
+          filename = match[1];
+        }
+      }
+
+      // 保存文件
+      const outputPath = path.join(outputDir, filename);
+      const buffer = await response.arrayBuffer();
+      fs.writeFileSync(outputPath, Buffer.from(buffer));
+
+      // 解压
+      const extractDir = path.join(outputDir, options.agentId);
+      await this.extractAgent(outputPath, extractDir);
+
+      // 清理压缩包
+      fs.unlinkSync(outputPath);
+
+      // 3. 读取版本号并更新缓存
+      const agentJsonPath = path.join(extractDir, "agent.json");
+      let resolvedVersion = options.version || "0.0.0";
+      if (fs.existsSync(agentJsonPath)) {
+        try {
+          const agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
+          resolvedVersion = agentJson.identity?.version || agentJson.version || resolvedVersion;
+        } catch { /* use default version */ }
+      }
+
+      // 更新缓存
+      this.cache.setFromDir(options.agentId, extractDir, resolvedVersion, { etag });
+
+      span.setAttribute("market.from_cache", false);
+      span.setStatus({ code: SpanStatusCode.OK });
+      span.end();
+
+      return {
+        success: true,
+        agent_id: options.agentId,
+        output_path: extractDir,
+        message: "Agent downloaded successfully",
+        fromCache: false,
+      };
+    });
   }
 
   /**
    * 获取 Agent 信息
    */
   async getAgent(agentId: string): Promise<AgentInfo> {
-    const url = `${this.baseUrl}/api/v1/agents/${agentId}`;
-    const response = await fetch(url);
+    return marketTracer.startActiveSpan("market.get_agent", async (span) => {
+      const url = `${this.baseUrl}/api/v1/agents/${agentId}`;
+      span.setAttribute("market.agent_id", agentId);
 
-    if (!response.ok) {
-      if (response.status === 404) {
-        throw ErrorHandlers.notFoundError('Agent', agentId);
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        recordMarketRequest("GET", "/api/v1/agents/{id}", "error");
+        if (response.status === 404) {
+          const err = ErrorHandlers.notFoundError('Agent', agentId);
+          span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+          span.recordException(err);
+          span.end();
+          throw err;
+        }
+        const err = new Error(`Failed to get agent: ${response.statusText}`);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+        span.recordException(err);
+        span.end();
+        throw err;
       }
-      throw new Error(`Failed to get agent: ${response.statusText}`);
-    }
 
-    return await response.json();
+      recordMarketRequest("GET", "/api/v1/agents/{id}", "success");
+      span.setStatus({ code: SpanStatusCode.OK });
+      span.end();
+      return await response.json();
+    });
   }
 
   /**
    * 搜索 Agent
    */
   async searchAgents(options: SearchOptions = {}): Promise<SearchResult> {
-    const params = new URLSearchParams();
-    if (options.query) params.append('q', options.query);
-    if (options.tag) params.append('tag', options.tag);
-    if (options.category) params.append('category', options.category);
-    if (options.limit) params.append('limit', options.limit.toString());
-    if (options.offset) params.append('offset', options.offset.toString());
+    return marketTracer.startActiveSpan("market.search_agents", async (span) => {
+      const params = new URLSearchParams();
+      if (options.query) params.append('q', options.query);
+      if (options.tag) params.append('tag', options.tag);
+      if (options.category) params.append('category', options.category);
+      if (options.limit) params.append('limit', options.limit.toString());
+      if (options.offset) params.append('offset', options.offset.toString());
 
-    const url = `${this.baseUrl}/api/v1/agents?${params.toString()}`;
+      const marketUrl = options.marketUrl || this.baseUrl;
+      const url = `${marketUrl}/api/v1/agents?${params.toString()}`;
+      span.setAttribute("market.url", url);
 
-    try {
-      const response = await fetch(url);
+      try {
+        const response = await fetch(url);
 
-      if (!response.ok) {
-        throw new Error(`Search failed: ${response.statusText}`);
+        if (!response.ok) {
+          recordMarketRequest("GET", "/api/v1/agents", "error");
+          const err = new Error(`Search failed: ${response.statusText}`);
+          span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+          span.recordException(err);
+          span.end();
+          throw err;
+        }
+
+        recordMarketRequest("GET", "/api/v1/agents", "success");
+        const result = await response.json();
+        span.setAttribute("market.result_total", result.total ?? 0);
+        span.setStatus({ code: SpanStatusCode.OK });
+        span.end();
+        return result;
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (msg.includes('fetch') || msg.includes('ECONNREFUSED')) {
+          const err = ErrorHandlers.marketConnectionError(this.baseUrl);
+          span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+          span.recordException(err);
+          span.end();
+          throw err;
+        }
+        span.setStatus({ code: SpanStatusCode.ERROR, message: msg });
+        if (error instanceof Error) span.recordException(error);
+        span.end();
+        throw error;
       }
-
-      return await response.json();
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes('fetch') || msg.includes('ECONNREFUSED')) {
-        throw ErrorHandlers.marketConnectionError(this.baseUrl);
-      }
-      throw error;
-    }
+    });
   }
 
   /**
@@ -421,6 +587,53 @@ export class MarketClient {
   async listAgents(limit: number = 50, offset: number = 0): Promise<SearchResult> {
     return this.searchAgents({ limit, offset });
   }
+
+  // ============================================================
+  // Agent 版本管理
+  // ============================================================
+
+  /**
+   * 列出 Agent 的所有版本
+   */
+  async listAgentVersions(agentId: string): Promise<VersionInfo[]> {
+    const url = `${this.baseUrl}/api/v1/agents/${agentId}/versions`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      recordMarketRequest("GET", "/api/v1/agents/{id}/versions", "error");
+      if (response.status === 404) {
+        throw ErrorHandlers.notFoundError('Agent', agentId);
+      }
+      throw new Error(`Failed to list agent versions: ${response.statusText}`);
+    }
+
+    recordMarketRequest("GET", "/api/v1/agents/{id}/versions", "success");
+    const data = await response.json();
+    return data.versions || data;
+  }
+
+  /**
+   * 获取 Agent 的特定版本信息
+   */
+  async getAgentVersion(agentId: string, version: string): Promise<AgentInfo> {
+    const url = `${this.baseUrl}/api/v1/agents/${agentId}/versions/${version}`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      recordMarketRequest("GET", "/api/v1/agents/{id}/versions/{version}", "error");
+      if (response.status === 404) {
+        throw ErrorHandlers.notFoundError('Agent version', `${agentId}@${version}`);
+      }
+      throw new Error(`Failed to get agent version: ${response.statusText}`);
+    }
+
+    recordMarketRequest("GET", "/api/v1/agents/{id}/versions/{version}", "success");
+    return await response.json();
+  }
+
+  // ============================================================
+  // Team 管理
+  // ============================================================
 
   /**
    * 上传 Team 到 Market
@@ -433,10 +646,10 @@ export class MarketClient {
       throw new Error(`team.json not found in directory: ${teamDir}`);
     }
 
-    let teamJson: any;
+    let teamJson: { name?: string; identity?: { name?: string; version?: string }; version?: string; identity_version?: string };
     try {
-      teamJson = JSON.parse(fs.readFileSync(teamJsonPath, "utf-8"));
-    } catch (error) {
+      teamJson = JSON.parse(fs.readFileSync(teamJsonPath, "utf-8")) as { name?: string; identity?: { name?: string; version?: string }; version?: string; identity_version?: string };
+    } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
       throw new Error(`Invalid team.json at ${teamJsonPath}: ${msg}`);
     }
@@ -472,6 +685,7 @@ export class MarketClient {
       });
 
       if (!response.ok) {
+        recordMarketRequest("POST", "/api/v1/teams", "error");
         if (response.status === 401 || response.status === 403) {
           throw ErrorHandlers.authenticationError();
         } else if (response.status === 409) {
@@ -482,6 +696,7 @@ export class MarketClient {
         }
       }
 
+      recordMarketRequest("POST", "/api/v1/teams", "success");
       const result = await response.json();
 
       return {
@@ -504,17 +719,22 @@ export class MarketClient {
    */
   async downloadTeam(options: TeamDownloadOptions): Promise<TeamDownloadResult> {
     const marketUrl = options.marketUrl || this.baseUrl;
-    const url = `${marketUrl}/api/v1/teams/${options.teamId}/download`;
+    let url = `${marketUrl}/api/v1/teams/${options.teamId}/download`;
+    if (options.version) {
+      url += `?version=${encodeURIComponent(options.version)}`;
+    }
 
     const response = await fetch(url);
 
     if (!response.ok) {
+      recordMarketRequest("GET", "/api/v1/teams/{id}/download", "error");
       if (response.status === 404) {
         throw ErrorHandlers.notFoundError('Team', options.teamId);
       }
       throw new Error(`Download failed: ${response.statusText}`);
     }
 
+    recordMarketRequest("GET", "/api/v1/teams/{id}/download", "success");
     const outputDir = path.resolve(options.outputDir);
     if (!fs.existsSync(outputDir)) {
       fs.mkdirSync(outputDir, { recursive: true });
@@ -554,12 +774,14 @@ export class MarketClient {
     const response = await fetch(url);
 
     if (!response.ok) {
+      recordMarketRequest("GET", "/api/v1/teams/{id}", "error");
       if (response.status === 404) {
         throw ErrorHandlers.notFoundError('Team', id);
       }
       throw new Error(`Failed to get team: ${response.statusText}`);
     }
 
+    recordMarketRequest("GET", "/api/v1/teams/{id}", "success");
     return await response.json();
   }
 
@@ -574,15 +796,18 @@ export class MarketClient {
     if (options.limit) params.append('limit', options.limit.toString());
     if (options.offset) params.append('offset', options.offset.toString());
 
-    const url = `${this.baseUrl}/api/v1/teams?${params.toString()}`;
+    const marketUrl = options.marketUrl || this.baseUrl;
+    const url = `${marketUrl}/api/v1/teams?${params.toString()}`;
 
     try {
       const response = await fetch(url);
 
       if (!response.ok) {
+        recordMarketRequest("GET", "/api/v1/teams", "error");
         throw new Error(`Search failed: ${response.statusText}`);
       }
 
+      recordMarketRequest("GET", "/api/v1/teams", "success");
       return await response.json();
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -592,6 +817,53 @@ export class MarketClient {
       throw error;
     }
   }
+
+  // ============================================================
+  // Team 版本管理
+  // ============================================================
+
+  /**
+   * 列出 Team 的所有版本
+   */
+  async listTeamVersions(teamId: string): Promise<VersionInfo[]> {
+    const url = `${this.baseUrl}/api/v1/teams/${teamId}/versions`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      recordMarketRequest("GET", "/api/v1/teams/{id}/versions", "error");
+      if (response.status === 404) {
+        throw ErrorHandlers.notFoundError('Team', teamId);
+      }
+      throw new Error(`Failed to list team versions: ${response.statusText}`);
+    }
+
+    recordMarketRequest("GET", "/api/v1/teams/{id}/versions", "success");
+    const data = await response.json();
+    return data.versions || data;
+  }
+
+  /**
+   * 获取 Team 的特定版本信息
+   */
+  async getTeamVersion(teamId: string, version: string): Promise<TeamInfo> {
+    const url = `${this.baseUrl}/api/v1/teams/${teamId}/versions/${version}`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      recordMarketRequest("GET", "/api/v1/teams/{id}/versions/{version}", "error");
+      if (response.status === 404) {
+        throw ErrorHandlers.notFoundError('Team version', `${teamId}@${version}`);
+      }
+      throw new Error(`Failed to get team version: ${response.statusText}`);
+    }
+
+    recordMarketRequest("GET", "/api/v1/teams/{id}/versions/{version}", "success");
+    return await response.json();
+  }
+
+  // ============================================================
+  // Workflow 管理
+  // ============================================================
 
   /**
    * 上传 Workflow 到 Market
@@ -604,10 +876,10 @@ export class MarketClient {
       throw new Error(`workflow.json not found in directory: ${workflowDir}`);
     }
 
-    let workflowJson: any;
+    let workflowJson: { name?: string; identity?: { name?: string; version?: string }; version?: string; identity_version?: string };
     try {
-      workflowJson = JSON.parse(fs.readFileSync(workflowJsonPath, "utf-8"));
-    } catch (error) {
+      workflowJson = JSON.parse(fs.readFileSync(workflowJsonPath, "utf-8")) as { name?: string; identity?: { name?: string; version?: string }; version?: string; identity_version?: string };
+    } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
       throw new Error(`Invalid workflow.json at ${workflowJsonPath}: ${msg}`);
     }
@@ -643,6 +915,7 @@ export class MarketClient {
       });
 
       if (!response.ok) {
+        recordMarketRequest("POST", "/api/v1/workflows", "error");
         if (response.status === 401 || response.status === 403) {
           throw ErrorHandlers.authenticationError();
         } else if (response.status === 409) {
@@ -653,6 +926,7 @@ export class MarketClient {
         }
       }
 
+      recordMarketRequest("POST", "/api/v1/workflows", "success");
       const result = await response.json();
 
       return {
@@ -675,17 +949,22 @@ export class MarketClient {
    */
   async downloadWorkflow(options: WorkflowDownloadOptions): Promise<WorkflowDownloadResult> {
     const marketUrl = options.marketUrl || this.baseUrl;
-    const url = `${marketUrl}/api/v1/workflows/${options.workflowId}/download`;
+    let url = `${marketUrl}/api/v1/workflows/${options.workflowId}/download`;
+    if (options.version) {
+      url += `?version=${encodeURIComponent(options.version)}`;
+    }
 
     const response = await fetch(url);
 
     if (!response.ok) {
+      recordMarketRequest("GET", "/api/v1/workflows/{id}/download", "error");
       if (response.status === 404) {
         throw ErrorHandlers.notFoundError('Workflow', options.workflowId);
       }
       throw new Error(`Download failed: ${response.statusText}`);
     }
 
+    recordMarketRequest("GET", "/api/v1/workflows/{id}/download", "success");
     const outputDir = path.resolve(options.outputDir);
     if (!fs.existsSync(outputDir)) {
       fs.mkdirSync(outputDir, { recursive: true });
@@ -725,12 +1004,14 @@ export class MarketClient {
     const response = await fetch(url);
 
     if (!response.ok) {
+      recordMarketRequest("GET", "/api/v1/workflows/{id}", "error");
       if (response.status === 404) {
         throw ErrorHandlers.notFoundError('Workflow', id);
       }
       throw new Error(`Failed to get workflow: ${response.statusText}`);
     }
 
+    recordMarketRequest("GET", "/api/v1/workflows/{id}", "success");
     return await response.json();
   }
 
@@ -751,9 +1032,11 @@ export class MarketClient {
       const response = await fetch(url);
 
       if (!response.ok) {
+        recordMarketRequest("GET", "/api/v1/workflows", "error");
         throw new Error(`Search failed: ${response.statusText}`);
       }
 
+      recordMarketRequest("GET", "/api/v1/workflows", "success");
       return await response.json();
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -762,6 +1045,49 @@ export class MarketClient {
       }
       throw error;
     }
+  }
+
+  // ============================================================
+  // Workflow 版本管理
+  // ============================================================
+
+  /**
+   * 列出 Workflow 的所有版本
+   */
+  async listWorkflowVersions(workflowId: string): Promise<VersionInfo[]> {
+    const url = `${this.baseUrl}/api/v1/workflows/${workflowId}/versions`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      recordMarketRequest("GET", "/api/v1/workflows/{id}/versions", "error");
+      if (response.status === 404) {
+        throw ErrorHandlers.notFoundError('Workflow', workflowId);
+      }
+      throw new Error(`Failed to list workflow versions: ${response.statusText}`);
+    }
+
+    recordMarketRequest("GET", "/api/v1/workflows/{id}/versions", "success");
+    const data = await response.json();
+    return data.versions || data;
+  }
+
+  /**
+   * 获取 Workflow 的特定版本信息
+   */
+  async getWorkflowVersion(workflowId: string, version: string): Promise<WorkflowInfo> {
+    const url = `${this.baseUrl}/api/v1/workflows/${workflowId}/versions/${version}`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      recordMarketRequest("GET", "/api/v1/workflows/{id}/versions/{version}", "error");
+      if (response.status === 404) {
+        throw ErrorHandlers.notFoundError('Workflow version', `${workflowId}@${version}`);
+      }
+      throw new Error(`Failed to get workflow version: ${response.statusText}`);
+    }
+
+    recordMarketRequest("GET", "/api/v1/workflows/{id}/versions/{version}", "success");
+    return await response.json();
   }
 
   // ============================================================
@@ -803,6 +1129,27 @@ export class MarketClient {
       cwd: extractDir,
       strip: 1, // 移除顶层目录
     });
+  }
+
+  /**
+   * 复制目录（用于缓存到输出目录）
+   */
+  private copyDir(src: string, dest: string): void {
+    if (!fs.existsSync(dest)) {
+      fs.mkdirSync(dest, { recursive: true });
+    }
+
+    const entries = fs.readdirSync(src, { withFileTypes: true });
+    for (const entry of entries) {
+      const srcPath = path.join(src, entry.name);
+      const destPath = path.join(dest, entry.name);
+
+      if (entry.isDirectory()) {
+        this.copyDir(srcPath, destPath);
+      } else {
+        fs.copyFileSync(srcPath, destPath);
+      }
+    }
   }
 }
 
@@ -900,522 +1247,111 @@ export async function downloadAgent(options: DownloadOptions): Promise<DownloadR
 }
 
 // ============================================================
-// Team 支持
-// ============================================================
-
-export interface TeamInfo {
-  id: string;
-  name: string;
-  display_name: string;
-  version: string;
-  description: string;
-  author: string;
-  category: string;
-  tags: string[];
-  downloads: number;
-  rating: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface TeamSearchResult {
-  teams: TeamInfo[];
-  total: number;
-  limit: number;
-  offset: number;
-}
-
-export interface UploadTeamOptions {
-  teamDir: string;
-  force?: boolean;
-  marketUrl?: string;
-  apiKey?: string;
-}
-
-export interface UploadTeamResult {
-  success: boolean;
-  team_id: string;
-  team_name: string;
-  version: string;
-  market_url: string;
-  message?: string;
-}
-
-export interface DownloadTeamOptions {
-  teamName: string;
-  outputDir: string;
-  version?: string;
-  marketUrl?: string;
-}
-
-export interface DownloadTeamResult {
-  success: boolean;
-  team_id: string;
-  output_path: string;
-  message?: string;
-}
-
-// 在 MarketClient 上扩展 team/workflow 方法
-declare module "./market.js" {
-  // 保持编译期声明一致
-}
-
-export class TeamMarketClient {
-  private baseUrl: string;
-  private apiKey?: string;
-
-  constructor(config: MarketConfig) {
-    this.baseUrl = config.baseUrl || process.env.MARKET_API_URL || "http://localhost:8321";
-    this.apiKey = config.apiKey || process.env.MARKET_API_KEY;
-  }
-
-  async uploadTeam(options: UploadTeamOptions): Promise<UploadTeamResult> {
-    const teamDir = path.resolve(options.teamDir);
-    const teamJsonPath = path.join(teamDir, "team.json");
-
-    if (!fs.existsSync(teamJsonPath)) {
-      throw ErrorHandlers.missingAgentJson(teamDir);
-    }
-
-    let teamJson: any;
-    try {
-      teamJson = JSON.parse(fs.readFileSync(teamJsonPath, "utf-8"));
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      throw ErrorHandlers.invalidAgentJson(teamJsonPath, msg);
-    }
-
-    const teamName = teamJson.identity?.name || teamJson.name;
-    const version = teamJson.identity?.version || teamJson.version;
-
-    const tar = await import("tar");
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-deploy-team-"));
-    const packagePath = path.join(tmpDir, `${teamName}-v${version}.tar.gz`);
-
-    await tar.create(
-      { gzip: true, file: packagePath, cwd: path.dirname(teamDir) },
-      [path.basename(teamDir)]
-    );
-
-    try {
-      const marketUrl = options.marketUrl || this.baseUrl;
-      const apiKey = options.apiKey || this.apiKey;
-
-      const formData = new FormData();
-      const fileBuffer = await fs.promises.readFile(packagePath);
-      const blob = new Blob([fileBuffer], { type: "application/gzip" });
-      formData.append("file", blob, `${teamName}-v${version}.tar.gz`);
-      formData.append("force", options.force ? "true" : "false");
-
-      const fetchHeaders: Record<string, string> = {};
-      if (apiKey) {
-        fetchHeaders["Authorization"] = `Bearer ${apiKey}`;
-      }
-
-      const response = await fetch(`${marketUrl}/api/v1/teams`, {
-        method: "POST",
-        headers: fetchHeaders,
-        body: formData,
-      });
-
-      if (!response.ok) {
-        if (response.status === 401 || response.status === 403) {
-          throw ErrorHandlers.authenticationError();
-        } else if (response.status === 409) {
-          throw ErrorHandlers.conflictError(teamName, version);
-        } else {
-          const error = await response.json().catch(() => ({ detail: response.statusText }));
-          throw new Error(error.detail || `Upload failed: ${response.statusText}`);
-        }
-      }
-
-      const result = await response.json();
-
-      return {
-        success: true,
-        team_id: result.id || teamName,
-        team_name: teamName,
-        version: version,
-        market_url: `${marketUrl}/teams/${teamName}`,
-        message: result.message || "Team uploaded successfully",
-      };
-    } finally {
-      if (fs.existsSync(packagePath)) {
-        fs.unlinkSync(packagePath);
-      }
-      if (fs.existsSync(tmpDir)) {
-        try { fs.rmdirSync(tmpDir); } catch { /* ignore */ }
-      }
-    }
-  }
-
-  async downloadTeam(options: DownloadTeamOptions): Promise<DownloadTeamResult> {
-    const marketUrl = options.marketUrl || this.baseUrl;
-    const versionQuery = options.version ? `?version=${encodeURIComponent(options.version)}` : "";
-    const url = `${marketUrl}/api/v1/teams/${options.teamName}/download${versionQuery}`;
-
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        throw ErrorHandlers.notFoundError('Team', options.teamName);
-      }
-      throw new Error(`Download failed: ${response.statusText}`);
-    }
-
-    const outputDir = path.resolve(options.outputDir);
-    if (!fs.existsSync(outputDir)) {
-      fs.mkdirSync(outputDir, { recursive: true });
-    }
-
-    const contentDisposition = response.headers.get("content-disposition");
-    let filename = `${options.teamName}.tar.gz`;
-    if (contentDisposition) {
-      const match = contentDisposition.match(/filename="?([^"]+)"?/);
-      if (match) filename = match[1];
-    }
-
-    const outputPath = path.join(outputDir, filename);
-    const buffer = await response.arrayBuffer();
-    fs.writeFileSync(outputPath, Buffer.from(buffer));
-
-    const tar = await import("tar");
-    const extractDir = path.join(outputDir, options.teamName);
-    if (!fs.existsSync(extractDir)) {
-      fs.mkdirSync(extractDir, { recursive: true });
-    }
-    await tar.extract({ file: outputPath, cwd: extractDir, strip: 1 });
-
-    fs.unlinkSync(outputPath);
-
-    return {
-      success: true,
-      team_id: options.teamName,
-      output_path: extractDir,
-      message: "Team downloaded successfully",
-    };
-  }
-
-  async getTeam(teamId: string): Promise<TeamInfo> {
-    const url = `${this.baseUrl}/api/v1/teams/${teamId}`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      if (response.status === 404) throw ErrorHandlers.notFoundError('Team', teamId);
-      throw new Error(`Failed to get team: ${response.statusText}`);
-    }
-    return await response.json();
-  }
-
-  async searchTeams(options: SearchOptions = {}): Promise<TeamSearchResult> {
-    const params = new URLSearchParams();
-    if (options.query) params.append('q', options.query);
-    if (options.tag) params.append('tag', options.tag);
-    if (options.category) params.append('category', options.category);
-    if (options.limit) params.append('limit', options.limit.toString());
-    if (options.offset) params.append('offset', options.offset.toString());
-
-    const url = `${this.baseUrl}/api/v1/teams?${params.toString()}`;
-
-    try {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Search failed: ${response.statusText}`);
-      return await response.json();
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes('fetch') || msg.includes('ECONNREFUSED')) {
-        throw ErrorHandlers.marketConnectionError(this.baseUrl);
-      }
-      throw error;
-    }
-  }
-}
-
-// ============================================================
-// Workflow 支持
-// ============================================================
-
-export interface WorkflowInfo {
-  id: string;
-  name: string;
-  display_name: string;
-  version: string;
-  description: string;
-  author: string;
-  category: string;
-  tags: string[];
-  downloads: number;
-  rating: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface WorkflowSearchResult {
-  workflows: WorkflowInfo[];
-  total: number;
-  limit: number;
-  offset: number;
-}
-
-export interface UploadWorkflowOptions {
-  workflowDir: string;
-  force?: boolean;
-  marketUrl?: string;
-  apiKey?: string;
-}
-
-export interface UploadWorkflowResult {
-  success: boolean;
-  workflow_id: string;
-  workflow_name: string;
-  version: string;
-  market_url: string;
-  message?: string;
-}
-
-export interface DownloadWorkflowOptions {
-  workflowName: string;
-  outputDir: string;
-  version?: string;
-  marketUrl?: string;
-}
-
-export interface DownloadWorkflowResult {
-  success: boolean;
-  workflow_id: string;
-  output_path: string;
-  message?: string;
-}
-
-export class WorkflowMarketClient {
-  private baseUrl: string;
-  private apiKey?: string;
-
-  constructor(config: MarketConfig) {
-    this.baseUrl = config.baseUrl || process.env.MARKET_API_URL || "http://localhost:8321";
-    this.apiKey = config.apiKey || process.env.MARKET_API_KEY;
-  }
-
-  async uploadWorkflow(options: UploadWorkflowOptions): Promise<UploadWorkflowResult> {
-    const workflowDir = path.resolve(options.workflowDir);
-    const workflowJsonPath = path.join(workflowDir, "workflow.json");
-
-    if (!fs.existsSync(workflowJsonPath)) {
-      throw ErrorHandlers.missingAgentJson(workflowDir);
-    }
-
-    let workflowJson: any;
-    try {
-      workflowJson = JSON.parse(fs.readFileSync(workflowJsonPath, "utf-8"));
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      throw ErrorHandlers.invalidAgentJson(workflowJsonPath, msg);
-    }
-
-    const workflowName = workflowJson.identity?.name || workflowJson.name;
-    const version = workflowJson.identity?.version || workflowJson.version;
-
-    const tar = await import("tar");
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-deploy-workflow-"));
-    const packagePath = path.join(tmpDir, `${workflowName}-v${version}.tar.gz`);
-
-    await tar.create(
-      { gzip: true, file: packagePath, cwd: path.dirname(workflowDir) },
-      [path.basename(workflowDir)]
-    );
-
-    try {
-      const marketUrl = options.marketUrl || this.baseUrl;
-      const apiKey = options.apiKey || this.apiKey;
-
-      const formData = new FormData();
-      const fileBuffer = await fs.promises.readFile(packagePath);
-      const blob = new Blob([fileBuffer], { type: "application/gzip" });
-      formData.append("file", blob, `${workflowName}-v${version}.tar.gz`);
-      formData.append("force", options.force ? "true" : "false");
-
-      const fetchHeaders: Record<string, string> = {};
-      if (apiKey) {
-        fetchHeaders["Authorization"] = `Bearer ${apiKey}`;
-      }
-
-      const response = await fetch(`${marketUrl}/api/v1/workflows`, {
-        method: "POST",
-        headers: fetchHeaders,
-        body: formData,
-      });
-
-      if (!response.ok) {
-        if (response.status === 401 || response.status === 403) {
-          throw ErrorHandlers.authenticationError();
-        } else if (response.status === 409) {
-          throw ErrorHandlers.conflictError(workflowName, version);
-        } else {
-          const error = await response.json().catch(() => ({ detail: response.statusText }));
-          throw new Error(error.detail || `Upload failed: ${response.statusText}`);
-        }
-      }
-
-      const result = await response.json();
-
-      return {
-        success: true,
-        workflow_id: result.id || workflowName,
-        workflow_name: workflowName,
-        version: version,
-        market_url: `${marketUrl}/workflows/${workflowName}`,
-        message: result.message || "Workflow uploaded successfully",
-      };
-    } finally {
-      if (fs.existsSync(packagePath)) {
-        fs.unlinkSync(packagePath);
-      }
-      if (fs.existsSync(tmpDir)) {
-        try { fs.rmdirSync(tmpDir); } catch { /* ignore */ }
-      }
-    }
-  }
-
-  async downloadWorkflow(options: DownloadWorkflowOptions): Promise<DownloadWorkflowResult> {
-    const marketUrl = options.marketUrl || this.baseUrl;
-    const versionQuery = options.version ? `?version=${encodeURIComponent(options.version)}` : "";
-    const url = `${marketUrl}/api/v1/workflows/${options.workflowName}/download${versionQuery}`;
-
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        throw ErrorHandlers.notFoundError('Workflow', options.workflowName);
-      }
-      throw new Error(`Download failed: ${response.statusText}`);
-    }
-
-    const outputDir = path.resolve(options.outputDir);
-    if (!fs.existsSync(outputDir)) {
-      fs.mkdirSync(outputDir, { recursive: true });
-    }
-
-    const contentDisposition = response.headers.get("content-disposition");
-    let filename = `${options.workflowName}.tar.gz`;
-    if (contentDisposition) {
-      const match = contentDisposition.match(/filename="?([^"]+)"?/);
-      if (match) filename = match[1];
-    }
-
-    const outputPath = path.join(outputDir, filename);
-    const buffer = await response.arrayBuffer();
-    fs.writeFileSync(outputPath, Buffer.from(buffer));
-
-    const tar = await import("tar");
-    const extractDir = path.join(outputDir, options.workflowName);
-    if (!fs.existsSync(extractDir)) {
-      fs.mkdirSync(extractDir, { recursive: true });
-    }
-    await tar.extract({ file: outputPath, cwd: extractDir, strip: 1 });
-
-    fs.unlinkSync(outputPath);
-
-    return {
-      success: true,
-      workflow_id: options.workflowName,
-      output_path: extractDir,
-      message: "Workflow downloaded successfully",
-    };
-  }
-
-  async getWorkflow(workflowId: string): Promise<WorkflowInfo> {
-    const url = `${this.baseUrl}/api/v1/workflows/${workflowId}`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      if (response.status === 404) throw ErrorHandlers.notFoundError('Workflow', workflowId);
-      throw new Error(`Failed to get workflow: ${response.statusText}`);
-    }
-    return await response.json();
-  }
-
-  async searchWorkflows(options: SearchOptions = {}): Promise<WorkflowSearchResult> {
-    const params = new URLSearchParams();
-    if (options.query) params.append('q', options.query);
-    if (options.tag) params.append('tag', options.tag);
-    if (options.category) params.append('category', options.category);
-    if (options.limit) params.append('limit', options.limit.toString());
-    if (options.offset) params.append('offset', options.offset.toString());
-
-    const url = `${this.baseUrl}/api/v1/workflows?${params.toString()}`;
-
-    try {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Search failed: ${response.statusText}`);
-      return await response.json();
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes('fetch') || msg.includes('ECONNREFUSED')) {
-        throw ErrorHandlers.marketConnectionError(this.baseUrl);
-      }
-      throw error;
-    }
-  }
-}
-
-// ============================================================
 // Team / Workflow 便捷函数
 // ============================================================
 
-export async function uploadTeam(options: UploadTeamOptions): Promise<UploadTeamResult> {
-  const client = new TeamMarketClient({
+export async function uploadTeam(options: TeamUploadOptions): Promise<TeamUploadResult> {
+  const client = new MarketClient({
     baseUrl: options.marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
     apiKey: options.apiKey || process.env.MARKET_API_KEY,
   });
   return await client.uploadTeam(options);
 }
 
-export async function downloadTeam(options: DownloadTeamOptions): Promise<DownloadTeamResult> {
-  const client = new TeamMarketClient({
+export async function downloadTeam(options: TeamDownloadOptions): Promise<TeamDownloadResult> {
+  const client = new MarketClient({
     baseUrl: options.marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
   });
   return await client.downloadTeam(options);
 }
 
-export async function searchTeams(options: SearchOptions = {}, marketUrl?: string): Promise<TeamSearchResult> {
-  const client = new TeamMarketClient({
+export async function searchTeams(options: TeamSearchOptions = {}, marketUrl?: string): Promise<TeamSearchResult> {
+  const client = new MarketClient({
     baseUrl: marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
   });
   return await client.searchTeams(options);
 }
 
 export async function getTeam(teamId: string, marketUrl?: string): Promise<TeamInfo> {
-  const client = new TeamMarketClient({
+  const client = new MarketClient({
     baseUrl: marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
   });
   return await client.getTeam(teamId);
 }
 
-export async function uploadWorkflow(options: UploadWorkflowOptions): Promise<UploadWorkflowResult> {
-  const client = new WorkflowMarketClient({
+export async function uploadWorkflow(options: WorkflowUploadOptions): Promise<WorkflowUploadResult> {
+  const client = new MarketClient({
     baseUrl: options.marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
     apiKey: options.apiKey || process.env.MARKET_API_KEY,
   });
   return await client.uploadWorkflow(options);
 }
 
-export async function downloadWorkflow(options: DownloadWorkflowOptions): Promise<DownloadWorkflowResult> {
-  const client = new WorkflowMarketClient({
+export async function downloadWorkflow(options: WorkflowDownloadOptions): Promise<WorkflowDownloadResult> {
+  const client = new MarketClient({
     baseUrl: options.marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
   });
   return await client.downloadWorkflow(options);
 }
 
-export async function searchWorkflows(options: SearchOptions = {}, marketUrl?: string): Promise<WorkflowSearchResult> {
-  const client = new WorkflowMarketClient({
+export async function searchWorkflows(options: WorkflowSearchOptions = {}, marketUrl?: string): Promise<WorkflowSearchResult> {
+  const client = new MarketClient({
     baseUrl: marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
   });
   return await client.searchWorkflows(options);
 }
 
 export async function getWorkflow(workflowId: string, marketUrl?: string): Promise<WorkflowInfo> {
-  const client = new WorkflowMarketClient({
+  const client = new MarketClient({
     baseUrl: marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
   });
   return await client.getWorkflow(workflowId);
+}
+
+// ============================================================
+// 版本管理便捷函数
+// ============================================================
+
+export async function listAgentVersions(agentId: string, marketUrl?: string): Promise<VersionInfo[]> {
+  const client = new MarketClient({
+    baseUrl: marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
+  });
+  return await client.listAgentVersions(agentId);
+}
+
+export async function getAgentVersion(agentId: string, version: string, marketUrl?: string): Promise<AgentInfo> {
+  const client = new MarketClient({
+    baseUrl: marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
+  });
+  return await client.getAgentVersion(agentId, version);
+}
+
+export async function listTeamVersions(teamId: string, marketUrl?: string): Promise<VersionInfo[]> {
+  const client = new MarketClient({
+    baseUrl: marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
+  });
+  return await client.listTeamVersions(teamId);
+}
+
+export async function getTeamVersion(teamId: string, version: string, marketUrl?: string): Promise<TeamInfo> {
+  const client = new MarketClient({
+    baseUrl: marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
+  });
+  return await client.getTeamVersion(teamId, version);
+}
+
+export async function listWorkflowVersions(workflowId: string, marketUrl?: string): Promise<VersionInfo[]> {
+  const client = new MarketClient({
+    baseUrl: marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
+  });
+  return await client.listWorkflowVersions(workflowId);
+}
+
+export async function getWorkflowVersion(workflowId: string, version: string, marketUrl?: string): Promise<WorkflowInfo> {
+  const client = new MarketClient({
+    baseUrl: marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
+  });
+  return await client.getWorkflowVersion(workflowId, version);
 }
 
 // ============================================================

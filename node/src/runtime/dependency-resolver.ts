@@ -12,6 +12,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { AgentCache } from "./agent-cache.js";
 import { MarketAgentLoader } from "./agent-loader.js";
+import { MarketClient } from "../market.js";
 
 export interface ResolvedDependency {
   name: string;
@@ -21,15 +22,26 @@ export interface ResolvedDependency {
   children?: ResolvedDependency[];
 }
 
+export interface ResolveDependenciesOptions {
+  marketUrl?: string;
+  withDeps?: boolean;
+  lockFile?: string;
+}
+
 export class DependencyResolver {
   private cache: AgentCache;
   private marketLoader: MarketAgentLoader;
+  private marketClient: MarketClient;
   private visited = new Set<string>();
   private resolved = new Map<string, ResolvedDependency>();
+  private visitPath: string[] = [];
 
   constructor(marketUrl?: string) {
     this.cache = new AgentCache();
     this.marketLoader = new MarketAgentLoader(this.cache, marketUrl);
+    this.marketClient = new MarketClient({
+      baseUrl: marketUrl || process.env.MARKET_API_URL || "http://localhost:8321",
+    });
   }
 
   /**
@@ -41,6 +53,7 @@ export class DependencyResolver {
   async resolve(agentDir: string): Promise<Map<string, ResolvedDependency>> {
     this.visited.clear();
     this.resolved.clear();
+    this.visitPath = [];
 
     await this.resolveRecursive(agentDir);
 
@@ -48,6 +61,84 @@ export class DependencyResolver {
     this.detectCycles();
 
     return this.resolved;
+  }
+
+  /**
+   * 通过 agentId 从 Market 解析依赖
+   *
+   * @param agentId Agent ID
+   * @param options 解析选项
+   * @returns 解析后的依赖列表
+   */
+  async resolveDependencies(
+    agentId: string,
+    options: ResolveDependenciesOptions = {}
+  ): Promise<ResolvedDependency[]> {
+    const { marketUrl, withDeps = true } = options;
+
+    this.visited.clear();
+    this.resolved.clear();
+    this.visitPath = [];
+
+    // 如果不需要解析依赖，直接返回空数组
+    if (!withDeps) {
+      return [];
+    }
+
+    // 1. 先从 Market 下载 agent
+    const downloadResult = await this.marketClient.downloadAgent({
+      agentId,
+      outputDir: path.join(this.cache.getCacheDir(), "_downloads"),
+      marketUrl,
+    });
+
+    // 2. 递归解析依赖
+    await this.resolveRecursive(downloadResult.output_path);
+
+    // 3. 循环依赖检测
+    this.detectCycles();
+
+    // 4. 构建依赖树结构
+    const deps: ResolvedDependency[] = [];
+    for (const [name, dep] of this.resolved) {
+      if (name !== agentId) {
+        deps.push(dep);
+      }
+    }
+
+    // 5. 清理临时下载目录
+    try {
+      fs.rmSync(downloadResult.output_path, { recursive: true, force: true });
+    } catch { /* ignore */ }
+
+    return deps;
+  }
+
+  /**
+   * 按依赖顺序批量下载安装依赖
+   *
+   * @param deps 解析后的依赖列表
+   * @param outputDir 输出目录
+   */
+  async installDependencies(deps: ResolvedDependency[], outputDir: string): Promise<void> {
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    // 拓扑排序确保按正确顺序安装
+    const sorted = this.topologicalSort(deps);
+
+    for (const dep of sorted) {
+      const targetDir = path.join(outputDir, dep.name);
+
+      // 如果目标已存在，跳过
+      if (fs.existsSync(targetDir)) {
+        continue;
+      }
+
+      // 复制依赖到输出目录
+      this.copyDir(dep.path, targetDir);
+    }
   }
 
   /** 递归解析依赖 */
@@ -61,6 +152,9 @@ export class DependencyResolver {
     if (this.visited.has(name)) return;
     this.visited.add(name);
 
+    // 记录访问路径用于循环依赖检测
+    this.visitPath.push(name);
+
     // 读取依赖声明
     const agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
     const deps = agentJson.dependencies?.agents || {};
@@ -71,6 +165,14 @@ export class DependencyResolver {
 
       // 跳过自身引用
       if (depName === name) continue;
+
+      // 检测循环依赖（在解析阶段就检测）
+      if (this.visitPath.includes(depName)) {
+        const cycle = this.visitPath.slice(this.visitPath.indexOf(depName)).concat(depName);
+        throw new Error(
+          `Circular dependency detected: ${cycle.join(" → ")}`
+        );
+      }
 
       // 已解析过的跳过
       if (this.resolved.has(depName)) continue;
@@ -107,6 +209,9 @@ export class DependencyResolver {
       // 3. 递归解析子依赖
       await this.resolveRecursive(depPath);
     }
+
+    // 回溯
+    this.visitPath.pop();
   }
 
   /** 检测循环依赖（DFS） */
@@ -153,6 +258,43 @@ export class DependencyResolver {
     }
   }
 
+  /** 拓扑排序 */
+  private topologicalSort(deps: ResolvedDependency[]): ResolvedDependency[] {
+    const graph = new Map<string, string[]>();
+    const depMap = new Map<string, ResolvedDependency>();
+
+    for (const dep of deps) {
+      depMap.set(dep.name, dep);
+      graph.set(dep.name, this.getDependencies(dep.path));
+    }
+
+    const visited = new Set<string>();
+    const result: ResolvedDependency[] = [];
+
+    const visit = (name: string) => {
+      if (visited.has(name)) return;
+      visited.add(name);
+
+      const children = graph.get(name) || [];
+      for (const child of children) {
+        if (depMap.has(child)) {
+          visit(child);
+        }
+      }
+
+      const dep = depMap.get(name);
+      if (dep) {
+        result.push(dep);
+      }
+    };
+
+    for (const dep of deps) {
+      visit(dep.name);
+    }
+
+    return result;
+  }
+
   /** 读取 agent.json 的依赖列表 */
   private getDependencies(agentDir: string): string[] {
     const agentJsonPath = path.join(agentDir, "agent.json");
@@ -177,6 +319,25 @@ export class DependencyResolver {
       return agentJson.identity?.name || agentJson.name || path.basename(agentDir);
     } catch {
       return path.basename(agentDir);
+    }
+  }
+
+  /** 复制目录 */
+  private copyDir(src: string, dest: string): void {
+    if (!fs.existsSync(dest)) {
+      fs.mkdirSync(dest, { recursive: true });
+    }
+
+    const entries = fs.readdirSync(src, { withFileTypes: true });
+    for (const entry of entries) {
+      const srcPath = path.join(src, entry.name);
+      const destPath = path.join(dest, entry.name);
+
+      if (entry.isDirectory()) {
+        this.copyDir(srcPath, destPath);
+      } else {
+        fs.copyFileSync(srcPath, destPath);
+      }
     }
   }
 }

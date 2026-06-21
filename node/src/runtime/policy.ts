@@ -1,23 +1,43 @@
 /**
  * Execution Policy — Runtime security sandbox for Agent execution.
  *
- * All Agents run in restricted mode by default. Users must explicitly
- * `--trusted` to grant full capabilities. The PolicyRegistry manages
- * per-agent policy settings.
+ * Supports 3-level policy model:
+ *   - restricted: no bash, no network, cwd-only fs access
+ *   - standard:   read-only network, limited fs access
+ *   - trusted:    full capabilities
+ *
+ * Policies can be loaded from policy.yaml (Policy-as-Code).
  */
 
-export interface ExecutionPolicy {
+export type PolicyLevel = 'restricted' | 'standard' | 'trusted';
+
+export interface PolicyConfig {
+  /** Policy level */
+  level: PolicyLevel;
+
   /** Allow shell command execution via bash tool */
   allowBash: boolean;
 
-  /** File system paths the agent can read/write (default: agent working dir only) */
+  /** File system paths the agent can read/write */
   allowedPaths: string[];
+
+  /** File system paths explicitly blocked */
+  blockedPaths: string[];
 
   /** Allow outbound HTTP requests via web_fetch */
   allowNetwork: boolean;
 
   /** Allow web search via web_search */
   allowWebSearch: boolean;
+
+  /** Network host whitelist (empty = allow all when allowNetwork is true) */
+  networkWhitelist: string[];
+
+  /** Maximum file size in bytes */
+  maxFileSize: number;
+
+  /** Maximum execution time in milliseconds */
+  maxExecutionTime: number;
 
   /** Maximum number of concurrent sub-agent invocations */
   maxConcurrentAgents: number;
@@ -26,24 +46,55 @@ export interface ExecutionPolicy {
   timeoutMs: number;
 }
 
-/** Default restricted policy — no bash, no network, cwd-only fs access */
-export const DEFAULT_RESTRICTED_POLICY: ExecutionPolicy = {
+/** Default restricted policy — minimal permissions */
+export const DEFAULT_RESTRICTED_POLICY: PolicyConfig = {
+  level: 'restricted',
   allowBash: false,
   allowedPaths: [],
+  blockedPaths: [],
   allowNetwork: false,
   allowWebSearch: false,
+  networkWhitelist: [],
+  maxFileSize: 10 * 1024 * 1024, // 10MB
+  maxExecutionTime: 300000, // 5 min
   maxConcurrentAgents: 1,
   timeoutMs: 300000,
 };
 
-/** Trusted policy — grants full access (equivalent to current behavior) */
-export const TRUSTED_POLICY: ExecutionPolicy = {
-  allowBash: true,
+/** Standard policy — limited network, controlled fs access */
+export const DEFAULT_STANDARD_POLICY: PolicyConfig = {
+  level: 'standard',
+  allowBash: false,
   allowedPaths: [],
+  blockedPaths: [],
   allowNetwork: true,
   allowWebSearch: true,
+  networkWhitelist: [],
+  maxFileSize: 50 * 1024 * 1024, // 50MB
+  maxExecutionTime: 600000, // 10 min
+  maxConcurrentAgents: 3,
+  timeoutMs: 600000,
+};
+
+/** Trusted policy — grants full access */
+export const DEFAULT_TRUSTED_POLICY: PolicyConfig = {
+  level: 'trusted',
+  allowBash: true,
+  allowedPaths: [],
+  blockedPaths: [],
+  allowNetwork: true,
+  allowWebSearch: true,
+  networkWhitelist: [],
+  maxFileSize: 100 * 1024 * 1024, // 100MB
+  maxExecutionTime: 600000, // 10 min
   maxConcurrentAgents: 10,
   timeoutMs: 600000,
+};
+
+export const LEVEL_POLICIES: Record<PolicyLevel, PolicyConfig> = {
+  restricted: DEFAULT_RESTRICTED_POLICY,
+  standard: DEFAULT_STANDARD_POLICY,
+  trusted: DEFAULT_TRUSTED_POLICY,
 };
 
 /**
@@ -75,26 +126,31 @@ export const BLOCKED_IP_RANGES = [
  * PolicyRegistry — stores per-agent execution policies.
  */
 export class PolicyRegistry {
-  private policies = new Map<string, ExecutionPolicy>();
-  private defaultPolicy: ExecutionPolicy;
+  private policies = new Map<string, PolicyConfig>();
+  private defaultPolicy: PolicyConfig;
 
-  constructor(defaultPolicy: ExecutionPolicy = DEFAULT_RESTRICTED_POLICY) {
+  constructor(defaultPolicy: PolicyConfig = DEFAULT_RESTRICTED_POLICY) {
     this.defaultPolicy = defaultPolicy;
   }
 
   /** Get the policy for an agent, returning defaults if none set */
-  get(agentName: string): ExecutionPolicy {
+  get(agentName: string): PolicyConfig {
     return this.policies.get(agentName) || this.defaultPolicy;
   }
 
-  /** Set a custom policy for an agent (e.g., when --trusted is used) */
-  set(agentName: string, policy: ExecutionPolicy): void {
+  /** Set a custom policy for an agent */
+  set(agentName: string, policy: PolicyConfig): void {
     this.policies.set(agentName, policy);
+  }
+
+  /** Set policy level for an agent */
+  setLevel(agentName: string, level: PolicyLevel): void {
+    this.set(agentName, { ...LEVEL_POLICIES[level] });
   }
 
   /** Grant full trust to an agent */
   trust(agentName: string): void {
-    this.set(agentName, { ...TRUSTED_POLICY });
+    this.setLevel(agentName, 'trusted');
   }
 
   /** Reset an agent to the default restricted policy */
@@ -104,8 +160,13 @@ export class PolicyRegistry {
 
   /** Check if an agent is currently trusted */
   isTrusted(agentName: string): boolean {
-    return this.policies.has(agentName) &&
-      this.policies.get(agentName)!.allowBash === true;
+    const policy = this.policies.get(agentName);
+    return policy ? policy.level === 'trusted' : false;
+  }
+
+  /** Get the policy level for an agent */
+  getLevel(agentName: string): PolicyLevel {
+    return this.get(agentName).level;
   }
 
   /**
@@ -119,7 +180,7 @@ export class PolicyRegistry {
   }
 
   /** Get the current default policy */
-  getDefault(): ExecutionPolicy {
+  getDefault(): PolicyConfig {
     return this.defaultPolicy;
   }
 }

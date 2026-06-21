@@ -6,7 +6,7 @@ import { getPolicyRegistry } from "../policy.js";
 
 /**
  * Write file tool
- * Writes text content to a file
+ * Writes text content to a file with policy enforcement
  */
 export class WriteFileTool implements Tool {
   name = "write_file";
@@ -38,9 +38,24 @@ export class WriteFileTool implements Tool {
       ? args.path
       : path.resolve(context.cwd, args.path);
 
-    // Security: check allowed paths
     const agentName = context.agent?.identity?.name || context.agent?.name || "unknown";
     const policy = getPolicyRegistry().get(agentName);
+
+    // Security: check blocked paths
+    if (policy.blockedPaths.length > 0) {
+      const resolved = path.resolve(filePath);
+      const blocked = policy.blockedPaths.some((p) =>
+        resolved.startsWith(path.resolve(p))
+      );
+      if (blocked) {
+        throw new Error(
+          `write_file: Path '${filePath}' is in a blocked path. ` +
+          `Agent '${agentName}' cannot access blocked paths.`
+        );
+      }
+    }
+
+    // Security: check allowed paths
     if (policy.allowedPaths.length > 0) {
       const resolved = path.resolve(filePath);
       const allowed = policy.allowedPaths.some((p) =>

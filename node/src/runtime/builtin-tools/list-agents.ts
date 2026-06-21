@@ -6,28 +6,45 @@
  */
 import { ToolRegistry } from "../tool-registry.js";
 import { MarketClient } from "../../market.js";
+import { ExecutionContext } from "../types.js";
+
+interface ListAgentsArgs {
+  include_market?: boolean;
+}
+
+interface AgentListItem {
+  name: string;
+  description: string;
+  source: string;
+}
+
+interface ListAgentsResult {
+  total: number;
+  agents: AgentListItem[];
+}
+
+interface ToolLike {
+  description?: string;
+}
 
 export const listAgentsTool = {
   name: "list_agents",
 
   description: "List all registered sub-agents with their descriptions. Supports optional market discovery.",
 
-  async execute(args: any, _context: any): Promise<{
-    total: number;
-    agents: Array<{ name: string; description: string; source: string }>;
-  }> {
+  async execute(args: ListAgentsArgs, _context: ExecutionContext): Promise<ListAgentsResult> {
     const registry = ToolRegistry.from(_context);
-    const agentTools: Array<{ name: string; description: string; source: string }> = [];
+    const agentTools: AgentListItem[] = [];
 
     // Local agents from registry
     if (registry) {
       const tools = registry.list();
       for (const toolName of tools) {
         if (toolName.startsWith("agent/")) {
-          const tool = registry.get(toolName);
+          const tool = registry.get(toolName) as ToolLike | undefined;
           agentTools.push({
             name: toolName.replace("agent/", ""),
-            description: (tool as any)?.description || "No description",
+            description: tool?.description || "No description",
             source: "local",
           });
         }

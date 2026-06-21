@@ -13,14 +13,15 @@ import { WorkerYamlParser } from "../parser.js";
 import { V2CompatibilityLayer } from "../v2-compat.js";
 import { ToolRegistry } from "../tool-registry.js";
 import { AgentCache } from "../agent-cache.js";
-import { MarketAgentLoader, FileSystemAgentLoader, AgentResolver } from "../agent-loader.js";
+import { MarketAgentLoader } from "../agent-loader.js";
 import { getPolicyRegistry } from "../policy.js";
 import { MCPToolLoader, MCPServerEntry } from "../mcp-integration.js";
 import { SkillLoader, SkillDefinition } from "../skill-integration.js";
+import { ExecutionContext } from "../types.js";
 
 interface InvokeAgentArgs {
   agent: string;        // Agent 路径 / market:// URL / 简单名称
-  input: any;           // 传给子 agent 的输入参数
+  input: unknown;       // 传给子 agent 的输入参数
   cwd?: string;         // 可选：子 agent 的工作目录
   version?: string;     // 可选：指定版本 market:// 下载时使用
   /** 动态覆盖：instructions / skills / mcp_servers */
@@ -36,7 +37,7 @@ export const invokeAgentTool = {
 
   description: "调用另一个 agent 执行子任务。支持 market:// URL 自动下载",
 
-  async execute(args: InvokeAgentArgs, context: any): Promise<any> {
+  async execute(args: InvokeAgentArgs, context: ExecutionContext): Promise<unknown> {
     const { agent, input, cwd, version } = args;
 
     // 从 context 获取 registry（Phase 6）
@@ -103,7 +104,7 @@ export const invokeAgentTool = {
     }
 
     // 3. 加载 agent 元数据
-    const agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8"));
+    const agentJson = JSON.parse(fs.readFileSync(agentJsonPath, "utf-8")) as { identity?: { name?: string }; name?: string };
     const agentName = agentJson.identity?.name || agentJson.name || path.basename(agentDir);
 
     console.log(`  ↳ Invoking sub-agent: ${agentName}`);
@@ -128,12 +129,14 @@ export const invokeAgentTool = {
     const parentEnv = ExecutionContextManager.getAllEnv(context) || {};
     const subContext = ExecutionContextManager.create({
       agent: { name: agentName, identity: { name: agentName } },
-      initialArgs: input,
+      initialArgs: input as Record<string, any>,
       cwd: subCwd,
       env: { ...parentEnv, ...((input as any)?.__env || {}) },
     });
     // Propagate trace_id through the call chain
     if (context.trace_id) subContext.trace_id = context.trace_id;
+    // Propagate OTel trace context for distributed tracing continuity
+    if (context.otelContext) subContext.otelContext = { ...context.otelContext };
 
     // 将 registry 附加到子 context，支持嵌套 invoke_agent
 

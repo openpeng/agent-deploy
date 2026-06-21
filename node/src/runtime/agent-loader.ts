@@ -67,7 +67,7 @@ export class MarketAgentLoader implements AgentLoaderInterface {
     }
 
     // 4. 安装到缓存
-    const cachedPath = this.cache.install(agentId, resolvedVersion, result.output_path);
+    const cachedPath = this.cache.setFromDir(agentId, result.output_path, resolvedVersion);
 
     // 5. 清理下载目录
     try { fs.rmSync(result.output_path, { recursive: true, force: true }); } catch { /* ignore */ }

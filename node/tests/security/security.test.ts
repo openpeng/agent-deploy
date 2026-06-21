@@ -2,7 +2,7 @@
  * Security Tests for agent-deploy runtime
  */
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_RESTRICTED_POLICY, TRUSTED_POLICY, PolicyRegistry, DANGEROUS_COMMAND_PATTERNS, BLOCKED_IP_RANGES } from '../../src/runtime/policy.js';
+import { DEFAULT_RESTRICTED_POLICY, DEFAULT_TRUSTED_POLICY, PolicyRegistry, DANGEROUS_COMMAND_PATTERNS, BLOCKED_IP_RANGES } from '../../src/runtime/policy.js';
 
 describe('Security: Path Traversal Detection', () => {
   it('detects ../ patterns in paths', () => {
@@ -29,13 +29,13 @@ describe('Security: ExecutionPolicy Defaults', () => {
   });
 
   it('trusted policy allows all operations', () => {
-    expect(TRUSTED_POLICY.allowBash).toBe(true);
-    expect(TRUSTED_POLICY.allowNetwork).toBe(true);
-    expect(TRUSTED_POLICY.allowWebSearch).toBe(true);
+    expect(DEFAULT_TRUSTED_POLICY.allowBash).toBe(true);
+    expect(DEFAULT_TRUSTED_POLICY.allowNetwork).toBe(true);
+    expect(DEFAULT_TRUSTED_POLICY.allowWebSearch).toBe(true);
   });
 
   it('trusted policy allows empty allowedPaths (no restriction)', () => {
-    expect(TRUSTED_POLICY.allowedPaths).toEqual([]);
+    expect(DEFAULT_TRUSTED_POLICY.allowedPaths).toEqual([]);
   });
 });
 
