@@ -15,6 +15,154 @@ const __dirname = path.dirname(__filename);
 // Template directory
 const TEMPLATES_DIR = path.join(__dirname, 'templates');
 
+// ============================================================
+// Template generation helpers (programmatic creation)
+// ============================================================
+
+export interface GenerateAgentOptions {
+  name: string;
+  description: string;
+  tools?: string[];
+  modelProvider?: string;
+  modelId?: string;
+}
+
+export interface GenerateWorkerOptions {
+  agentName: string;
+  steps?: Array<{ name: string; agent: string; prompt: string }>;
+}
+
+export interface GenerateTeamOptions {
+  name: string;
+  members?: Array<{ name: string; role: string; agent: string }>;
+  mode?: 'sequential' | 'parallel' | 'supervisor';
+}
+
+/**
+ * Generate an agent.json template programmatically
+ */
+export function generateAgentTemplate(options: GenerateAgentOptions): AgentJsonV2 {
+  const {
+    name,
+    description,
+    tools = [],
+    modelProvider = 'openrouter',
+    modelId = 'openrouter/free',
+  } = options;
+
+  const displayName = name
+    .split(/[-_]/)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+
+  return {
+    schema_version: '2.0',
+    identity: {
+      name,
+      version: '0.1.0',
+      display_name: displayName,
+      description,
+      author: process.env.USER || process.env.USERNAME || 'Unknown',
+      license: 'MIT',
+      tags: ['agent-deploy'],
+    },
+    instructions: {
+      format: 'markdown',
+      source: 'inline',
+      content: `You are ${displayName}. ${description}`,
+    },
+    capabilities: tools.map(t => `Use ${t} tool`),
+    compatibility: {
+      model_provider: modelProvider,
+      model_id: modelId,
+    },
+  };
+}
+
+/**
+ * Generate a worker.yaml template programmatically
+ */
+export function generateWorkerTemplate(options: GenerateWorkerOptions): Record<string, any> {
+  const { agentName, steps = [{ name: 'step_1', agent: agentName, prompt: 'Execute the main task' }] } = options;
+
+  return {
+    version: '1.0',
+    worker: {
+      name: `${agentName}_worker`,
+      description: `Worker for ${agentName}`,
+      agent: agentName,
+      steps,
+    },
+  };
+}
+
+/**
+ * Generate a team.yaml template programmatically
+ */
+export function generateTeamTemplate(options: GenerateTeamOptions): Record<string, any> {
+  const { name, members = [], mode = 'sequential' } = options;
+  const displayName = name
+    .split(/[-_]/)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+
+  return {
+    version: '1.0',
+    team: {
+      name,
+      display_name: displayName,
+      description: `Team: ${displayName}`,
+      mode,
+      members,
+    },
+  };
+}
+
+/**
+ * Write template to file (JSON or YAML based on extension)
+ */
+export function writeTemplateToFile(template: object, outputPath: string): string {
+  const dir = path.dirname(outputPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const ext = path.extname(outputPath).toLowerCase();
+  if (ext === '.json') {
+    fs.writeFileSync(outputPath, JSON.stringify(template, null, 2), 'utf-8');
+  } else if (ext === '.yaml' || ext === '.yml') {
+    // Simple YAML serialization without external dependency
+    fs.writeFileSync(outputPath, _toYaml(template), 'utf-8');
+  } else {
+    fs.writeFileSync(outputPath, JSON.stringify(template, null, 2), 'utf-8');
+  }
+
+  return outputPath;
+}
+
+/**
+ * Simple object-to-YAML serializer
+ */
+function _toYaml(obj: any, indent = 0): string {
+  const spaces = '  '.repeat(indent);
+  if (obj === null || obj === undefined) return '';
+  if (typeof obj === 'string') return obj.includes('\n') ? `|\n${spaces}${obj.split('\n').join('\n' + spaces)}` : obj;
+  if (typeof obj === 'number' || typeof obj === 'boolean') return String(obj);
+  if (Array.isArray(obj)) {
+    if (obj.length === 0) return '[]';
+    return obj.map(item => `${spaces}- ${_toYaml(item, indent + 1).trimStart()}`).join('\n');
+  }
+  const entries = Object.entries(obj);
+  if (entries.length === 0) return '{}';
+  return entries.map(([k, v]) => {
+    if (v === null || v === undefined) return `${spaces}${k}:`;
+    if (typeof v === 'object') {
+      return `${spaces}${k}:\n${_toYaml(v, indent + 1)}`;
+    }
+    return `${spaces}${k}: ${_toYaml(v, 0)}`;
+  }).join('\n');
+}
+
 export interface TemplateInfo {
   id: string;
   name: string;
