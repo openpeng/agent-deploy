@@ -2,9 +2,18 @@
 // 接收前端请求，调用 LLM 生成 Agent 配置
 
 import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
+
+// 静态文件：项目文档首页
+const docsDir = path.resolve(__dirname, '..', 'docs');
+app.use('/docs', express.static(docsDir));
 
 // 配置
 const PORT = parseInt(process.env.PORT || '3210', 10);

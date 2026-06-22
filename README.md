@@ -378,6 +378,7 @@ Coverage includes:
 - [CLI_IMPORT_GUIDE.md](./docs/guides/CLI_IMPORT_GUIDE.md) — CLI 导入命令详细指南
 
 ### Technical Docs
+- [PROJECT_OVERVIEW.md](./docs/PROJECT_OVERVIEW.md) — 项目概览：架构、协议、API 参考、快速入门
 - [AGENT_JSON_SPEC_V2.md](./docs/specs/AGENT_JSON_SPEC_V2.md) — agent.json v2.0 规范
 - [IMPORT_ADAPTER_SPEC.md](./docs/guides/IMPORT_ADAPTER_SPEC.md) — ImportAdapter 接口规范
 - [IMPORT_AGENT_TOOL_GUIDE.md](./docs/guides/IMPORT_AGENT_TOOL_GUIDE.md) — MCP import_agent 工具指南
