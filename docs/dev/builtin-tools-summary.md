@@ -1,7 +1,80 @@
 # Runtime Builtin Tools - Implementation Summary
 
 ## Overview
+
 All 7 builtin tools have been successfully implemented for the Agent Protocol v3 Runtime layer.
+
+## Kimi WebBridge — External HTTP JSON MCP (不是 builtin tool)
+
+Kimi WebBridge 是一个特殊的 MCP 工具：**不走 builtin tool 体系，而是作为外部 HTTP MCP 集成**。
+
+### 与 builtin tools 的区别
+
+| | Builtin Tools | Kimi WebBridge |
+|---|---|---|
+| 定义位置 | `src/runtime/tools/*.ts` | `agent_compose/kimi_webbridge_client.py` |
+| 传输方式 | 直接函数调用 | HTTP JSON API (`POST http://127.0.0.1:10086/command`) |
+| 协议 | TypeScript 函数 | Chrome DevTools Protocol |
+| 运行环境 | Node.js 进程内 | 浏览器扩展 + 本地 daemon |
+| Shell 权限 | ❌ 需要（有 bash.ts） | ✅ **不需要** |
+| 子进程 | ❌ 需要（有 StdioTransport） | ✅ **不需要** |
+
+### 工具命名（重要）
+
+Kimi WebBridge agent.json 中声明的工具名是 `browser_*` 前缀，但 **LLM 实际看到的工具名是 `webbridge_*` 前缀**。Python 运行时同时注册两套名字，LLM 用哪个都能调用。
+
+| agent.json capability 声明 | LLM 调用名 | daemon action | 说明 |
+|---|---|---|---|
+| `browser_navigate` | `webbridge_navigate` | `navigate` | 打开 URL |
+| `browser_snapshot` | `webbridge_snapshot` | `snapshot` | 获取可访问性树 |
+| `browser_click` | `webbridge_click` | `click` | 点击元素 |
+| `browser_fill` | `webbridge_fill` | `fill` | 填写表单 |
+| `browser_type` | `webbridge_type` | `key_type` | 输入文本 |
+| `browser_keys` | `webbridge_keys` | `send_keys` | 发送按键 |
+| `browser_evaluate` | `webbridge_evaluate` | `evaluate` | 执行 JavaScript |
+| `browser_screenshot` | `webbridge_screenshot` | `screenshot` | 截图 |
+| `browser_pdf` | `webbridge_pdf` | `save_as_pdf` | 保存 PDF |
+| `browser_list_tabs` | `webbridge_list_tabs` | `list_tabs` | 列出 tabs |
+| `browser_find_tab` | `webbridge_find_tab` | `find_tab` | 查找切换 tab |
+| `browser_close_tab` | `webbridge_close_tab` | `close_tab` | 关闭 tab |
+
+### 端到端验证结果（2026-06-20）
+
+```
+Step 1: health_check   ✅ running=True, extension_connected=True, v1.10.0
+Step 2: load_agent     ✅ market fetch + agent.json 解析
+Step 3: mcp_init       ✅ connected=['kimi-webbridge'], 24 tools (12 webbridge_* + 12 browser_*)
+Step 4: direct_tools   ✅ navigate → success, snapshot → content, evaluate → "Example Domain"
+Step 5: llm_chat      ✅ LLM 调用 browser_navigate + webbridge_snapshot，返回 "Example Domain"
+Step 6: interactive    ✅ 多轮对话正常
+总计: 6/6 ✅
+```
+
+### 在 Node/TypeScript 运行时集成 WebBridge
+
+Node 运行时通过 `MCPToolLoader` 集成 HTTP MCP 时，需要特殊处理 `kimi-webbridge` 类型：
+
+```typescript
+// 在 mcp-integration.ts 中扩展检测逻辑
+async listToolsFromWebBridge(
+  serverName: string,
+  entry: MCPHttpServerConfig
+): Promise<MCPToolDefinition[]> {
+  // GET /status 健康检查
+  const status = await httpMCPRequest(entry.url, "status", {});
+  if (!status.running || !status.extension_connected) {
+    console.warn(`[WebBridge] ${serverName} daemon not ready:`, status);
+    return [];
+  }
+
+  // 硬编码 12 个工具 schema（因为 WebBridge 不提供 tools/list 接口）
+  return WEBBRIDGE_TOOL_DEFINITIONS;
+}
+```
+
+> **注意**：WebBridge daemon (`/command` 接口) 目前不提供 `tools/list` 接口，因此需要运行时**硬编码工具 schema 定义**。这也是 `agent_compose` 的 Python 运行时在 `kimi_webbridge_client.py` 中用 `_WEBBRIDGE_TOOLS` 列表驱动的原因。
+
+---
 
 ## Completed Tools
 

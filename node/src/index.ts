@@ -16,7 +16,11 @@ import { CursorImportAdapter } from "./adapters/cursor-import.js";
 import { ClaudeImportAdapter } from "./adapters/claude-import.js";
 import { CodeBuddyImportAdapter } from "./adapters/codebuddy-import.js";
 import { GitHubImportAdapter } from "./adapters/github-import.js";
-import { uploadAgent, downloadAgent } from "./market.js";
+import {
+  uploadAgent, downloadAgent,
+  uploadTeam, downloadTeam, searchTeams, getTeam,
+  uploadWorkflow, downloadWorkflow, searchWorkflows, getWorkflow
+} from "./market.js";
 import { AgentExecutor } from "./runtime/agent-executor.js";
 import { MarketClient } from "./market.js";
 import { scanDeployedAgents, getDeploymentSummary } from "./scan-deployed.js";
@@ -186,6 +190,132 @@ const TOOLS: Tool[] = [
         },
       },
       required: ["agent"],
+    },
+  },
+  {
+    name: "upload_team",
+    description: "Upload a Team package to the Market. Requires a valid API key.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        team_dir: { type: "string", description: "Path to the Team directory containing team.json" },
+        market_url: { type: "string", description: "Market API URL (default: $MARKET_API_URL or http://localhost:8321)" },
+        api_key: { type: "string", description: "API key for authentication (default: $MARKET_API_KEY)" },
+        force: { type: "boolean", description: "Force overwrite existing version (default: false)" },
+      },
+      required: ["team_dir"],
+    },
+  },
+  {
+    name: "download_team",
+    description: "Download a Team from the Market by ID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        team_id: { type: "string", description: "Team ID to download from Market" },
+        output_dir: { type: "string", description: "Output directory (default: ./downloaded-teams)" },
+        market_url: { type: "string", description: "Market API URL (default: $MARKET_API_URL or http://localhost:8321)" },
+      },
+      required: ["team_id"],
+    },
+  },
+  {
+    name: "list_teams",
+    description: "List Teams available on the Market.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tag: { type: "string", description: "Filter by tag (optional)" },
+        category: { type: "string", description: "Filter by category (optional)" },
+        market_url: { type: "string", description: "Market API URL (optional)" },
+        limit: { type: "number", description: "Max number of results (default: 50)" },
+      },
+    },
+  },
+  {
+    name: "get_team",
+    description: "Get the full detail of a Team from the Market.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        team_id: { type: "string", description: "Team ID to retrieve" },
+        market_url: { type: "string", description: "Market API URL (optional)" },
+      },
+      required: ["team_id"],
+    },
+  },
+  {
+    name: "validate_team",
+    description: "Validate a team.json file for required fields and format.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        team_dir: { type: "string", description: "Path to the Team directory containing team.json" },
+      },
+      required: ["team_dir"],
+    },
+  },
+  {
+    name: "upload_workflow",
+    description: "Upload a Workflow package to the Market. Requires a valid API key.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workflow_dir: { type: "string", description: "Path to the Workflow directory containing workflow.json" },
+        market_url: { type: "string", description: "Market API URL (default: $MARKET_API_URL or http://localhost:8321)" },
+        api_key: { type: "string", description: "API key for authentication (default: $MARKET_API_KEY)" },
+        force: { type: "boolean", description: "Force overwrite existing version (default: false)" },
+      },
+      required: ["workflow_dir"],
+    },
+  },
+  {
+    name: "download_workflow",
+    description: "Download a Workflow from the Market by ID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workflow_id: { type: "string", description: "Workflow ID to download from Market" },
+        output_dir: { type: "string", description: "Output directory (default: ./downloaded-workflows)" },
+        market_url: { type: "string", description: "Market API URL (default: $MARKET_API_URL or http://localhost:8321)" },
+      },
+      required: ["workflow_id"],
+    },
+  },
+  {
+    name: "list_workflows",
+    description: "List Workflows available on the Market.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tag: { type: "string", description: "Filter by tag (optional)" },
+        category: { type: "string", description: "Filter by category (optional)" },
+        market_url: { type: "string", description: "Market API URL (optional)" },
+        limit: { type: "number", description: "Max number of results (default: 50)" },
+      },
+    },
+  },
+  {
+    name: "get_workflow",
+    description: "Get the full detail of a Workflow from the Market.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workflow_id: { type: "string", description: "Workflow ID to retrieve" },
+        market_url: { type: "string", description: "Market API URL (optional)" },
+      },
+      required: ["workflow_id"],
+    },
+  },
+  {
+    name: "validate_workflow",
+    description: "Validate a workflow.json file for required fields and format.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workflow_dir: { type: "string", description: "Path to the Workflow directory containing workflow.json" },
+      },
+      required: ["workflow_dir"],
     },
   },
 ];
@@ -507,6 +637,311 @@ async function handleCheckUpdates(args: Record<string, unknown>): Promise<string
   return JSON.stringify({ total: updates.length, updates, summary }, null, 2);
 }
 
+async function handleUploadTeam(args: Record<string, unknown>): Promise<string> {
+  const teamDir = args.team_dir as string;
+  const marketUrl = args.market_url as string | undefined;
+  const apiKey = args.api_key as string | undefined;
+  const force = args.force as boolean | undefined;
+
+  if (!teamDir) {
+    throw new Error("team_dir is required");
+  }
+
+  try {
+    const result = await uploadTeam({
+      teamDir,
+      marketUrl,
+      apiKey,
+      force,
+    });
+
+    return JSON.stringify({
+      status: "success",
+      team_id: result.team_id,
+      team_name: result.team_name,
+      version: result.version,
+      market_url: result.market_url,
+      message: `✅ Successfully uploaded Team ${result.team_name} v${result.version}`,
+    }, null, 2);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Upload failed: ${msg}`);
+  }
+}
+
+async function handleDownloadTeam(args: Record<string, unknown>): Promise<string> {
+  const teamId = args.team_id as string;
+  const outputDir = args.output_dir as string | undefined || "./downloaded-teams";
+  const marketUrl = args.market_url as string | undefined;
+
+  if (!teamId) {
+    throw new Error("team_id is required");
+  }
+
+  try {
+    const result = await downloadTeam({
+      teamId,
+      outputDir,
+      marketUrl,
+    });
+
+    return JSON.stringify({
+      status: "success",
+      team_id: result.team_id,
+      output_path: result.output_path,
+      message: `✅ Successfully downloaded Team to: ${result.output_path}`,
+    }, null, 2);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Download failed: ${msg}`);
+  }
+}
+
+async function handleListTeams(args: Record<string, unknown>): Promise<string> {
+  const tag = args.tag as string | undefined;
+  const category = args.category as string | undefined;
+  const marketUrl = args.market_url as string | undefined;
+  const limit = (args.limit as number) || 50;
+
+  try {
+    const result = await searchTeams({
+      tag,
+      category,
+      marketUrl,
+      limit,
+    });
+
+    return JSON.stringify({
+      total: result.total,
+      teams: result.teams.map(t => ({
+        id: t.id,
+        name: t.name,
+        display_name: t.display_name,
+        version: t.version,
+        description: t.description,
+        category: t.category,
+        tags: t.tags,
+      })),
+    }, null, 2);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Search failed: ${msg}`);
+  }
+}
+
+async function handleGetTeam(args: Record<string, unknown>): Promise<string> {
+  const teamId = args.team_id as string;
+  const marketUrl = args.market_url as string | undefined;
+
+  if (!teamId) {
+    throw new Error("team_id is required");
+  }
+
+  try {
+    const team = await getTeam({ teamId, marketUrl });
+    return JSON.stringify({ status: "success", team }, null, 2);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Get Team failed: ${msg}`);
+  }
+}
+
+async function handleValidateTeam(args: Record<string, unknown>): Promise<string> {
+  const teamDir = args.team_dir as string;
+  if (!teamDir) throw new Error("team_dir is required");
+
+  try {
+    const teamJsonPath = path.join(teamDir, "team.json");
+    if (!fs.existsSync(teamJsonPath)) {
+      throw new Error(`team.json not found in: ${teamDir}`);
+    }
+
+    const content = fs.readFileSync(teamJsonPath, "utf-8");
+    const team = JSON.parse(content);
+
+    // Required top-level fields
+    const requiredTop = ["schema_version", "identity", "definition"];
+    const missingTop = requiredTop.filter(k => !team[k]);
+    if (missingTop.length > 0) {
+      throw new Error(`Missing top-level fields: ${missingTop.join(", ")}`);
+    }
+
+    // Required identity fields
+    const requiredIdentity = ["name", "version", "display_name", "description"];
+    const missingIdentity = requiredIdentity.filter(k => !team.identity?.[k]);
+    if (missingIdentity.length > 0) {
+      throw new Error(`Missing identity fields: ${missingIdentity.join(", ")}`);
+    }
+
+    // Required definition fields
+    if (!team.definition?.members || team.definition.members.length === 0) {
+      throw new Error("definition.members must be a non-empty array");
+    }
+
+    return JSON.stringify({
+      status: "success",
+      team_name: team.identity.name,
+      version: team.identity.version,
+      members_count: team.definition.members.length,
+      message: `✅ Team ${team.identity.name} v${team.identity.version} is valid`,
+    }, null, 2);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Validation failed: ${msg}`);
+  }
+}
+
+async function handleUploadWorkflow(args: Record<string, unknown>): Promise<string> {
+  const workflowDir = args.workflow_dir as string;
+  const marketUrl = args.market_url as string | undefined;
+  const apiKey = args.api_key as string | undefined;
+  const force = args.force as boolean | undefined;
+
+  if (!workflowDir) {
+    throw new Error("workflow_dir is required");
+  }
+
+  try {
+    const result = await uploadWorkflow({
+      workflowDir,
+      marketUrl,
+      apiKey,
+      force,
+    });
+
+    return JSON.stringify({
+      status: "success",
+      workflow_id: result.workflow_id,
+      workflow_name: result.workflow_name,
+      version: result.version,
+      market_url: result.market_url,
+      message: `✅ Successfully uploaded Workflow ${result.workflow_name} v${result.version}`,
+    }, null, 2);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Upload failed: ${msg}`);
+  }
+}
+
+async function handleDownloadWorkflow(args: Record<string, unknown>): Promise<string> {
+  const workflowId = args.workflow_id as string;
+  const outputDir = args.output_dir as string | undefined || "./downloaded-workflows";
+  const marketUrl = args.market_url as string | undefined;
+
+  if (!workflowId) {
+    throw new Error("workflow_id is required");
+  }
+
+  try {
+    const result = await downloadWorkflow({
+      workflowId,
+      outputDir,
+      marketUrl,
+    });
+
+    return JSON.stringify({
+      status: "success",
+      workflow_id: result.workflow_id,
+      output_path: result.output_path,
+      message: `✅ Successfully downloaded Workflow to: ${result.output_path}`,
+    }, null, 2);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Download failed: ${msg}`);
+  }
+}
+
+async function handleListWorkflows(args: Record<string, unknown>): Promise<string> {
+  const tag = args.tag as string | undefined;
+  const category = args.category as string | undefined;
+  const marketUrl = args.market_url as string | undefined;
+  const limit = (args.limit as number) || 50;
+
+  try {
+    const result = await searchWorkflows({
+      tag,
+      category,
+      marketUrl,
+      limit,
+    });
+
+    return JSON.stringify({
+      total: result.total,
+      workflows: result.workflows.map(w => ({
+        id: w.id,
+        name: w.name,
+        display_name: w.display_name,
+        version: w.version,
+        description: w.description,
+        category: w.category,
+        tags: w.tags,
+        steps_count: w.steps_count,
+      })),
+    }, null, 2);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Search failed: ${msg}`);
+  }
+}
+
+async function handleGetWorkflow(args: Record<string, unknown>): Promise<string> {
+  const workflowId = args.workflow_id as string;
+  const marketUrl = args.market_url as string | undefined;
+
+  if (!workflowId) {
+    throw new Error("workflow_id is required");
+  }
+
+  try {
+    const workflow = await getWorkflow({ workflowId, marketUrl });
+    return JSON.stringify({ status: "success", workflow }, null, 2);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Get Workflow failed: ${msg}`);
+  }
+}
+
+async function handleValidateWorkflow(args: Record<string, unknown>): Promise<string> {
+  const workflowDir = args.workflow_dir as string;
+  if (!workflowDir) throw new Error("workflow_dir is required");
+
+  try {
+    const workflowJsonPath = path.join(workflowDir, "workflow.json");
+    if (!fs.existsSync(workflowJsonPath)) {
+      throw new Error(`workflow.json not found in: ${workflowDir}`);
+    }
+
+    const content = fs.readFileSync(workflowJsonPath, "utf-8");
+    const workflow = JSON.parse(content);
+
+    const requiredTop = ["schema_version", "identity", "definition"];
+    const missingTop = requiredTop.filter(k => !workflow[k]);
+    if (missingTop.length > 0) {
+      throw new Error(`Missing top-level fields: ${missingTop.join(", ")}`);
+    }
+
+    const requiredIdentity = ["name", "version", "display_name", "description"];
+    const missingIdentity = requiredIdentity.filter(k => !workflow.identity?.[k]);
+    if (missingIdentity.length > 0) {
+      throw new Error(`Missing identity fields: ${missingIdentity.join(", ")}`);
+    }
+
+    if (!workflow.definition?.steps || workflow.definition.steps.length === 0) {
+      throw new Error("definition.steps must be a non-empty array");
+    }
+
+    return JSON.stringify({
+      status: "success",
+      workflow_name: workflow.identity.name,
+      version: workflow.identity.version,
+      steps_count: workflow.definition.steps.length,
+      message: `✅ Workflow ${workflow.identity.name} v${workflow.identity.version} is valid`,
+    }, null, 2);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Validation failed: ${msg}`);
+  }
+}
 
 // ---- Server Setup ----
 const server = new Server(
@@ -533,6 +968,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "scan_deployed": result = await handleScanDeployed(args ?? {}); break;
       case "uninstall_agent": result = await handleUninstallAgent(args ?? {}); break;
       case "check_updates": result = await handleCheckUpdates(args ?? {}); break;
+      case "upload_team": result = await handleUploadTeam(args ?? {}); break;
+      case "download_team": result = await handleDownloadTeam(args ?? {}); break;
+      case "list_teams": result = await handleListTeams(args ?? {}); break;
+      case "get_team": result = await handleGetTeam(args ?? {}); break;
+      case "validate_team": result = await handleValidateTeam(args ?? {}); break;
+      case "upload_workflow": result = await handleUploadWorkflow(args ?? {}); break;
+      case "download_workflow": result = await handleDownloadWorkflow(args ?? {}); break;
+      case "list_workflows": result = await handleListWorkflows(args ?? {}); break;
+      case "get_workflow": result = await handleGetWorkflow(args ?? {}); break;
+      case "validate_workflow": result = await handleValidateWorkflow(args ?? {}); break;
       default: throw new Error(`Unknown tool: ${name}`);
     }
     return { content: [{ type: "text", text: result }] };
