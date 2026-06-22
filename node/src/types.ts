@@ -38,6 +38,25 @@ export interface AgentJsonV2 {
   }>;
   category?: string;
   type?: string;
+  /** Skills 数组 — Market Upload 时自动解析（Format B） */
+  skills?: Array<{
+    name: string;
+    display_name?: string;
+    description?: string;
+    version?: string;
+    category?: string;
+    icon?: string;
+  }>;
+  /** MCP Servers 数组 — Market Upload 时自动解析（Format A1） */
+  mcp_servers?: Array<{
+    name: string;
+    description?: string;
+    command?: string;
+    args?: string[];
+    package?: string;
+    tools?: string[];
+    env?: Record<string, string>;
+  }>;
 }
 
 /**
