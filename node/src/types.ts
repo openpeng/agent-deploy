@@ -26,7 +26,7 @@ export interface AgentJsonV2 {
     file?: string;
   };
   capabilities?: string[];
-  compatibility?: Record<string, any>;
+  compatibility?: Record<string, unknown>;
   // PilotDeck format
   entry?: {
     main_subagent: string;
@@ -68,9 +68,9 @@ export interface AgentDescriptor {
   version: string;
   description: string;
   instructions: string;
-  capabilities: any[];
-  compatibility: Record<string, any>;
-  metadata: Record<string, any>;
+  capabilities: string[];
+  compatibility: Record<string, unknown>;
+  metadata: Record<string, unknown>;
 }
 
 /**
