@@ -8,9 +8,15 @@
 [![Tests](https://img.shields.io/badge/Tests-62%2F62%20passing-brightgreen.svg)](tests/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## ✨ What's New in v3.0
+## ✨ What's New in v3.1
 
-**Complete Agent Ecosystem** - 完整的双向闭环：
+**Skill / MCP Market References** - Agent 支持引用市场已发布的 Skill 和 MCP Server 包：
+
+- ✅ **Skill Ref** - `skills` 支持 `ref` + `version` 市场引用
+- ✅ **MCP Ref** - `mcp_servers` 支持 `ref` + `version` + `env_override` 市场引用
+- ✅ **Auto Resolution** - `market run` 自动解析并合并依赖
+- ✅ **Local Cache** - 依赖包本地缓存加速后续运行
+- ✅ **Version Constraints** - 支持 `^`、`~`、`>=` 等语义化版本约束
 
 ### Export (Phase 1) ✅
 - ✅ **Multi-Format Support** - agent.json 支持多种格式（instructions、subagents、SKILL.md）
@@ -28,6 +34,12 @@
 - ✅ **Download from Market** - 从 Market 下载他人分享的 Agent
 - ✅ **Auto Deploy** - 自动检测并部署到 AI 工具
 - ✅ **Complete Workflow** - Import → Upload → Download → Deploy
+
+### Skill / MCP Packaging (Phase 3.1) ✅
+- ✅ **Skill Pack** - 打包 Skill 为独立可发布包
+- ✅ **MCP Pack** - 打包 MCP Server 为独立可发布包
+- ✅ **Cache Management** - 本地缓存状态查看与清理
+- ✅ **Migration Tool** - Agent v2.0 → v3.1 引用格式迁移
 
 See [AGENT_FORMATS.md](AGENT_FORMATS.md) for format details.
 
@@ -139,6 +151,104 @@ download_agent({
   output_dir: "./downloaded-agents"
 })
 ```
+
+---
+
+### 🧩 Skill / MCP Commands (v3.1)
+
+#### Pack Skill
+
+```bash
+# Pack a Skill directory into a publishable package
+agent-deploy skill pack ./my-skill
+
+# Output: ./my-skill.skill.tar.gz
+```
+
+Skill package structure:
+```
+my-skill/
+├── skill.json          # Skill metadata (required)
+├── SKILL.md            # Skill instructions (required)
+├── scripts/            # Executable scripts (optional)
+└── templates/          # Template files (optional)
+```
+
+#### Upload Skill
+
+```bash
+# Upload Skill to Market
+agent-deploy skill upload ./my-skill
+
+# With custom Market URL
+agent-deploy skill upload ./my-skill -m http://market.example.com
+
+# Force overwrite
+agent-deploy skill upload ./my-skill --force
+```
+
+#### Pack MCP Server
+
+```bash
+# Pack an MCP Server directory into a publishable package
+agent-deploy mcp pack ./my-mcp
+
+# Output: ./my-mcp.mcp.tar.gz
+```
+
+MCP package structure:
+```
+my-mcp/
+├── mcp-server.json     # MCP Server metadata (required)
+├── mcp-config.json     # MCP configuration (required)
+└── README.md           # Setup instructions (required)
+```
+
+#### Upload MCP Server
+
+```bash
+# Upload MCP Server to Market
+agent-deploy mcp upload ./my-mcp
+
+# With custom Market URL
+agent-deploy mcp upload ./my-mcp -m http://market.example.com
+
+# Force overwrite
+agent-deploy mcp upload ./my-mcp --force
+```
+
+#### Cache Management
+
+```bash
+# View local cache status
+agent-deploy cache status
+
+# Clean all cached market packages
+agent-deploy cache clean
+
+# Clean cache for a specific market
+agent-deploy cache clean --market http://market.example.com
+```
+
+Cache location: `~/.cache/agent-deploy/market/`
+
+#### Migration Tool (v2.0 → v3.1)
+
+```bash
+# Migrate an existing agent.json to use Skill/MCP references
+agent-deploy migrate ./my-agent/agent.json
+
+# Preview migration without writing files
+agent-deploy migrate ./my-agent/agent.json --dry-run
+
+# Specify output path
+agent-deploy migrate ./my-agent/agent.json -o ./my-agent-v3/agent.json
+```
+
+The migration tool will:
+1. Scan `skills` and `mcp_servers` for inline definitions
+2. Suggest `ref` + `version` replacements for known market packages
+3. Generate a v3.1-compatible `agent.json`
 
 ---
 
@@ -509,8 +619,17 @@ echo "✅ All agents migrated!"
 - [x] Auto-deploy to AI tools
 - [x] Complete workflow (Import → Market → Deploy)
 
-### Phase 4: Advanced Features (Future)
-- [ ] Version management
+### Phase 4: Skill / MCP Ecosystem (v3.1) ✅
+- [x] Skill market references (`ref` + `version`)
+- [x] MCP Server market references (`ref` + `version` + `env_override`)
+- [x] Dependency auto-resolution in `market run`
+- [x] Local cache for Skill / MCP packages
+- [x] Semantic version constraints (`^`, `~`, `>=`)
+- [x] Skill / MCP pack & upload commands
+- [x] Cache status & clean commands
+- [x] Migration tool (v2.0 → v3.1)
+
+### Phase 5: Advanced Features (Future)
 - [ ] Batch operations CLI enhancements
 - [ ] List & search commands
 - [ ] More platform support (VS Code, JetBrains, etc.)
